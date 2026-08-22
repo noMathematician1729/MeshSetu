@@ -1,5 +1,24 @@
 import 'package:flutter/foundation.dart';
 
+/// Converts transport/platform detail into text that is safe for an emergency
+/// screen. The original detail remains in mesh metrics/diagnostics.
+String sosDeliveryUserMessage(String? detail) {
+  final value = (detail ?? '').toLowerCase();
+  if (value.contains('advertis') || value.contains('platform')) {
+    return 'Bluetooth advertising was rejected by Android. Keep Bluetooth on; the app will retry automatically.';
+  }
+  if (value.contains('permission') || value.contains('location')) {
+    return 'Bluetooth or Location permission is required. Open Settings, grant access, and keep Event Mode running.';
+  }
+  if (value.contains('event mode') || value.contains('foreground')) {
+    return 'The BLE relay is still starting. Keep Event Mode open and try again when it is active.';
+  }
+  if (value.contains('peer') || value.contains('device')) {
+    return 'No nearby mesh device has accepted the SOS yet. Keep Bluetooth on and move closer to another event participant.';
+  }
+  return 'The SOS is still safe on this device and will retry when the mesh is available.';
+}
+
 /// The user-visible lifecycle of a locally authored SOS.
 ///
 /// [saved] and [queued] are local guarantees. [broadcasting] means the
@@ -101,9 +120,7 @@ final class SosDeliveryTracker extends ValueNotifier<SosDeliveryStatus> {
             ? value.phase
             : SosDeliveryPhase.queued,
         broadcastFailed: true,
-        detail:
-            event.detail ??
-            'Compact broadcast unavailable; the encrypted packet remains queued for GATT relay.',
+        detail: sosDeliveryUserMessage(event.detail),
       ),
       SosDeliveryEventKind.relayConfirmed => value.copyWith(
         phase: SosDeliveryPhase.confirmed,

@@ -64,7 +64,17 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
     // Opening a room is the intent to participate in it. Without the radio up
     // the presence announcement below never leaves the outbox, so nobody in
     // the room can see anybody else offline.
-    unawaited(_ensureMeshForRoom());
+    unawaited(_ensureMeshAndStartPresence());
+  }
+
+  Future<void> _ensureMeshAndStartPresence() async {
+    try {
+      await _ensureMeshForRoom();
+    } catch (_) {
+      // The status banner remains the source of truth for startup failures;
+      // presence can still be queued and retried if the radio recovers.
+    }
+    if (!mounted) return;
     _presenceBeacon = RoomPresenceBeacon(
       announce: () => _announcePresence(force: true),
       interval: _reannounceInterval,
@@ -88,6 +98,27 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
     final status = ref.read(meshBridgeClientProvider)?.meshStatus;
     if (status?.eventModeRunning == true) return;
     await _startEventModeFromRoom();
+  }
+
+  Future<void> _showEventCodeDialog(String eventCode) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Compare event codes'),
+        content: Text(
+          'This phone is on event code:\n\n$eventCode\n\n'
+          'Ask the other phone to scan this room invite QR or enter this code. '
+          'MeshSetu will not connect devices from different events.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// Announces this device's membership over the mesh so peers with no
@@ -192,6 +223,9 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
               status: status,
               starting: _startingEventMode,
               onStartEventMode: _startEventModeFromRoom,
+              eventCode: widget.manifest.meshCode,
+              onResolveMismatch: () =>
+                  _showEventCodeDialog(widget.manifest.meshCode),
             ),
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
@@ -327,11 +361,15 @@ class _MeshStatusBanner extends StatelessWidget {
     required this.status,
     required this.starting,
     required this.onStartEventMode,
+    required this.eventCode,
+    required this.onResolveMismatch,
   });
 
   final MeshStatus status;
   final bool starting;
   final VoidCallback onStartEventMode;
+  final String eventCode;
+  final VoidCallback onResolveMismatch;
 
   @override
   Widget build(BuildContext context) {
@@ -419,11 +457,23 @@ class _MeshStatusBanner extends StatelessWidget {
                 Icon(Icons.warning_amber, size: 18, color: palette.caution),
                 const SizedBox(width: MeshSpace.sm),
                 Expanded(
-                  child: Text(
-                    'A nearby device is using a different event/site code. '
-                    'It will not appear here or connect until it joins '
-                    'this event.',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Different event detected',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      Text(
+                        'Nearby device is not on this event. Your code: $eventCode',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      TextButton.icon(
+                        onPressed: onResolveMismatch,
+                        icon: const Icon(Icons.qr_code_2, size: 18),
+                        label: const Text('Show code / invite'),
+                      ),
+                    ],
                   ),
                 ),
               ],

@@ -173,6 +173,7 @@ class MeshBridgeClient {
   bool _deliveringToAdmin = false;
   bool _adminDeliveryRerunRequested = false;
   Timer? _inboxSyncTimer;
+  Timer? _outboxExpiryTimer;
   bool _syncingInbox = false;
   String? _reporterUid;
   GatewayBridge? _contactBridge;
@@ -281,6 +282,11 @@ class MeshBridgeClient {
 
   void _activateOutbox() {
     unawaited(_restartOutbox());
+    _outboxExpiryTimer ??= Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_expireOverdue()),
+    );
+    unawaited(_expireOverdue());
     if (!syncRelayInbox) return;
     unawaited(_syncRelayInbox());
     _inboxSyncTimer ??= Timer.periodic(
@@ -291,6 +297,29 @@ class MeshBridgeClient {
 
   void setSiteId(String siteId) {
     prepareForSite(siteId: siteId);
+  }
+
+  Future<void> _expireOverdue() async {
+    final siteId = _siteId;
+    if (siteId == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final overdue = await _db.overdueForSite(siteId, now);
+    if (overdue.isEmpty) return;
+    await _db.expireOverdueForSite(siteId, now);
+    for (final row in overdue) {
+      if (row.payloadType != PayloadType.structuredSos.name ||
+          row.objectId == null) {
+        continue;
+      }
+      unawaited(
+        _emitSosDelivery(
+          kind: SosDeliveryEventKind.expired,
+          objectId: row.objectId!,
+          eventId: row.eventId,
+          detail: 'SOS delivery window expired before a peer acknowledged it.',
+        ),
+      );
+    }
   }
 
   Future<void> _restartOutbox() async {
@@ -318,6 +347,10 @@ class MeshBridgeClient {
         );
       },
     )..start();
+    final peerCount = _meshStatus.peerCount;
+    if (peerCount > 0) {
+      unawaited(_outbox!.onPeerCountChanged(peerCount));
+    }
   }
 
   Future<void> _emitSosDelivery({
@@ -478,6 +511,11 @@ class MeshBridgeClient {
             peers: snapshots,
           ),
         );
+        final connectedCount = peerMaps.where((peer) {
+          final connected = peer['connected'];
+          return connected == null || connected == true;
+        }).length;
+        unawaited(_outbox?.onPeerCountChanged(connectedCount));
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
@@ -874,6 +912,8 @@ class MeshBridgeClient {
   }
 
   Future<void> dispose() async {
+    _outboxExpiryTimer?.cancel();
+    _outboxExpiryTimer = null;
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
     _adminDeliveryTimer?.cancel();

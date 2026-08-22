@@ -91,14 +91,35 @@ class OutboxSender {
     });
   }
 
+  /// Called by the bridge when a real connected peer becomes available. Rows
+  /// that were accepted into the local relay scheduler but had no peer are
+  /// promoted back to ready so the scheduler can attempt a handoff.
+  Future<void> onPeerCountChanged(int peerCount) async {
+    if (peerCount > 0) await _db.promoteQueued(siteId);
+  }
+
   Future<void> onMetrics(List<RelayMetric> metrics) async {
     for (final m in metrics) {
       final objectId = m.objectId;
       if (objectId == null) continue;
-      if (m.kind == 'ack') {
-        await _markByObjectId(objectId, 'acked');
+      if (m.kind == 'frames_sent') {
+        await _markByObjectId(
+          objectId,
+          'relaying',
+          fromStates: const {'ready', 'queued', 'relaying'},
+        );
+      } else if (m.kind == 'ack') {
+        await _markByObjectId(
+          objectId,
+          'acked',
+          fromStates: const {'ready', 'queued', 'relaying'},
+        );
       } else if (m.kind == 'expired') {
-        await _markByObjectId(objectId, 'expired');
+        await _markByObjectId(
+          objectId,
+          'expired',
+          fromStates: const {'ready', 'queued', 'relaying'},
+        );
       }
     }
   }
@@ -121,22 +142,19 @@ class OutboxSender {
     _retryAfterMs.remove(row.eventId);
     _retryTimers.remove(row.eventId)?.cancel();
     _attempts.remove(row.eventId);
-    if (row.state == 'ready') {
-      await _db.markState(
-        row.eventId,
-        'relaying',
-        DateTime.now().millisecondsSinceEpoch,
-      );
-    }
   }
 
-  Future<void> _markByObjectId(int objectId, String state) async {
+  Future<void> _markByObjectId(
+    int objectId,
+    String state, {
+    required Set<String> fromStates,
+  }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await (_db.update(_db.outboxEvents)..where(
           (t) =>
               t.siteId.equals(siteId) &
               t.objectId.equals(objectId) &
-              t.state.equals('relaying'),
+              t.state.isIn(fromStates),
         ))
         .write(
           OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(now)),
@@ -160,7 +178,6 @@ class OutboxSender {
         await _db.markState(row.eventId, 'expired', now);
         return;
       }
-      await _db.markState(row.eventId, 'relaying', now);
       await _send(
         MeshEnvelope(
           objectId: objectId,
@@ -176,6 +193,13 @@ class OutboxSender {
           payload: Uint8List.fromList(payload),
           originEphemeralId: localEphemeralId,
         ),
+      );
+      // The foreground coordinator can accept an object into its durable
+      // scheduler with zero peers. Keep that distinction visible as queued;
+      // frames_sent is the transition to genuine peer handoff.
+      await _db.markQueuedIfReady(
+        row.eventId,
+        DateTime.now().millisecondsSinceEpoch,
       );
       _attempts.remove(row.eventId);
     } catch (error) {

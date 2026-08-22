@@ -785,6 +785,15 @@ class MeshEventController {
             ),
           ]);
         },
+        onRestored: () {
+          _reportMetrics([
+            RelayMetric(
+              'sos_alert_broadcast_restored',
+              objectId: objectId,
+              value: alert.sequence,
+            ),
+          ]);
+        },
       );
       return started;
     } catch (error) {

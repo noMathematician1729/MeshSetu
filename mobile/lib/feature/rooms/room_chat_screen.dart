@@ -55,7 +55,20 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     unawaited(_connectLiveTransport());
     // Chat is unusable offline unless the radio is up: both outgoing messages
     // and this device's presence sit in the outbox until Event Mode runs.
-    unawaited(_ensureMeshForRoom());
+    unawaited(_ensureMeshAndStartPresence());
+    // Messages that died while the radio was down are recoverable; requeue
+    // them now that this room is open again.
+    unawaited(_retryFailedMessages());
+  }
+
+  Future<void> _ensureMeshAndStartPresence() async {
+    try {
+      await _ensureMeshForRoom();
+    } catch (_) {
+      // The status banner remains the source of truth for startup failures;
+      // presence can still be queued and retried if the radio recovers.
+    }
+    if (!mounted) return;
     _presenceBeacon = RoomPresenceBeacon(
       announce: _announcePresence,
       peerCounts:
@@ -65,9 +78,6 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
               .map((status) => status.peerCount) ??
           const Stream<int>.empty(),
     )..start();
-    // Messages that died while the radio was down are recoverable; requeue
-    // them now that this room is open again.
-    unawaited(_retryFailedMessages());
   }
 
   Future<void> _ensureMeshForRoom() async {
@@ -319,6 +329,17 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
               status: status,
               starting: _startingEventMode,
               onStartEventMode: _startEventModeFromRoom,
+              eventCode: manifest?.meshCode ?? widget.siteId,
+              onResolveMismatch: manifest == null || matchingRoom == null
+                  ? null
+                  : () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => RoomLobbyScreen(
+                          manifest: manifest,
+                          room: matchingRoom.first,
+                        ),
+                      ),
+                    ),
             ),
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
@@ -683,11 +704,15 @@ class _MeshStatusBar extends StatelessWidget {
     required this.status,
     required this.starting,
     required this.onStartEventMode,
+    required this.eventCode,
+    this.onResolveMismatch,
   });
 
   final MeshStatus status;
   final bool starting;
   final VoidCallback onStartEventMode;
+  final String eventCode;
+  final VoidCallback? onResolveMismatch;
 
   @override
   Widget build(BuildContext context) {
@@ -758,14 +783,25 @@ class _MeshStatusBar extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(Icons.warning_amber, size: 14, color: palette.caution),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        'A nearby device is using a different event/site '
-                        'code — it will not connect.',
-                        style: Theme.of(context).textTheme.bodySmall,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Different event detected · this code: $eventCode',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                          if (onResolveMismatch != null)
+                            TextButton.icon(
+                              onPressed: onResolveMismatch,
+                              icon: const Icon(Icons.qr_code_2, size: 16),
+                              label: const Text('Show invite / code'),
+                            ),
+                        ],
                       ),
                     ),
                   ],

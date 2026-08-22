@@ -141,11 +141,9 @@ class EmergencyActiveScreen extends ConsumerWidget {
           ),
           const SizedBox(height: MeshSpace.lg),
           if (deliveryStatus case final status?)
-            _DeliveryProjectionPanel(status: status),
-          if (eventId case final id?) ...[
-            if (deliveryStatus != null) const SizedBox(height: MeshSpace.md),
-            _DeliveryPanel(eventId: id),
-          ],
+            _DeliveryProjectionPanel(status: status, eventId: eventId),
+          if (deliveryStatus == null && eventId != null)
+            _DeliveryPanel(eventId: eventId!),
           const SizedBox(height: MeshSpace.lg),
           meshStatus.when(
             data: (status) => _ScanningPanel(
@@ -192,45 +190,30 @@ class EmergencyActiveScreen extends ConsumerWidget {
   }
 }
 
-/// A live UI-isolate delivery projection. This is intentionally separate from
-/// the database panel: it shows the current foreground-task lifecycle, while
-/// the database panel shows the durable outbox row for a specific event.
-class _DeliveryProjectionPanel extends StatelessWidget {
-  const _DeliveryProjectionPanel({required this.status});
+/// One authoritative delivery projection. It merges the live bridge state with
+/// the durable row so the user never sees two different claims for one SOS.
+class _DeliveryProjectionPanel extends ConsumerWidget {
+  const _DeliveryProjectionPanel({required this.status, this.eventId});
 
   final SosDeliveryStatus status;
+  final String? eventId;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final db = ref.watch(databaseProvider);
+    final id = eventId;
+    if (id == null) return _panel(context, null);
+    return StreamBuilder<OutboxEvent?>(
+      stream: db.watchEvent(id),
+      builder: (context, snapshot) => _panel(context, snapshot.data?.state),
+    );
+  }
+
+  Widget _panel(BuildContext context, String? durableState) {
     final palette = MeshPalette.of(context);
-    final (label, detail, icon, tone) = switch (status.phase) {
-      SosDeliveryPhase.confirmed => (
-        'Mesh custody acknowledged',
-        'A nearby device accepted the SOS. Admin-backend delivery is not confirmed.',
-        Icons.check_circle_outline,
-        MeshStatusTone.active,
-      ),
-      SosDeliveryPhase.broadcasting => (
-        'Emergency SOS broadcasting',
-        status.detail,
-        Icons.bluetooth_audio,
-        MeshStatusTone.active,
-      ),
-      SosDeliveryPhase.failed => (
-        'Delivery failed',
-        status.detail,
-        Icons.error_outline,
-        MeshStatusTone.critical,
-      ),
-      SosDeliveryPhase.saved || SosDeliveryPhase.queued => (
-        'Waiting for a mesh peer',
-        status.detail,
-        Icons.hourglass_top,
-        MeshStatusTone.neutral,
-      ),
-    };
+    final presentation = _presentation(status, durableState);
     return MeshCard(
-      tint: switch (tone) {
+      tint: switch (presentation.$4) {
         MeshStatusTone.active => palette.live.withValues(alpha: 0.1),
         MeshStatusTone.critical => palette.ember.withValues(alpha: 0.08),
         MeshStatusTone.neutral => null,
@@ -239,8 +222,8 @@ class _DeliveryProjectionPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(
-            icon,
-            color: switch (tone) {
+            presentation.$3,
+            color: switch (presentation.$4) {
               MeshStatusTone.active => palette.live,
               MeshStatusTone.critical => palette.ember,
               MeshStatusTone.neutral => palette.mesh,
@@ -251,14 +234,64 @@ class _DeliveryProjectionPanel extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(label, style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  presentation.$1,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
                 const SizedBox(height: 2),
-                Text(detail, style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  presentation.$2,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+
+  static (String, String, IconData, MeshStatusTone) _presentation(
+    SosDeliveryStatus status,
+    String? durableState,
+  ) {
+    if (durableState == 'acked' || status.phase == SosDeliveryPhase.confirmed) {
+      return (
+        'Acknowledged by the mesh',
+        'A nearby device accepted the SOS and will continue relaying it.',
+        Icons.check_circle_outline,
+        MeshStatusTone.active,
+      );
+    }
+    if (durableState == 'relaying') {
+      return (
+        'Relaying now',
+        'Frames are being handed to a connected nearby device over Bluetooth.',
+        Icons.bluetooth_audio,
+        MeshStatusTone.active,
+      );
+    }
+    if (durableState == 'expired' || status.phase == SosDeliveryPhase.failed) {
+      return (
+        'Delivery unavailable',
+        status.detail,
+        Icons.error_outline,
+        MeshStatusTone.critical,
+      );
+    }
+    if (status.phase == SosDeliveryPhase.broadcasting) {
+      return (
+        'Emergency SOS broadcasting',
+        status.detail,
+        Icons.bluetooth_audio,
+        MeshStatusTone.active,
+      );
+    }
+    return (
+      'Waiting for a mesh peer',
+      status.detail,
+      Icons.hourglass_top,
+      MeshStatusTone.neutral,
     );
   }
 }
