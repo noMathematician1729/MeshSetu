@@ -31,15 +31,14 @@ void main() {
 
     expect(find.text('Emergency Aid'), findsOneWidget);
     expect(find.byType(MeshSosButton), findsOneWidget);
-    // Task 4: emergency type now surfaces in both the status rail and the
-    // action tile subtitle, so this appears twice rather than once.
-    expect(find.textContaining('Medical'), findsWidgets);
+    // Emergency type is shown only in its dedicated action tile.
+    expect(find.textContaining('Medical'), findsOneWidget);
     expect(find.text('Create'), findsOneWidget);
     expect(find.text('Join'), findsOneWidget);
     expect(find.byType(BottomNavigationBar), findsNothing);
   });
 
-  testWidgets('shows mesh status and hold-time in the status rail', (
+  testWidgets('does not show the top mesh status, hold-time, or type rail', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -62,36 +61,12 @@ void main() {
       ),
     );
 
-    expect(find.byType(MeshStatRail), findsOneWidget);
-    expect(find.text('Active'), findsOneWidget);
-    expect(find.text('4s'), findsOneWidget);
-  });
-
-  testWidgets('offline (event mode inactive) shows Offline in the rail', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: MeshTheme.light(),
-        home: EmergencyHomeScreen(
-          eventModeActive: false,
-          sending: false,
-          emergencyType: SosEmergencyType.general,
-          description: '',
-          holdSeconds: 3,
-          onSos: () {},
-          onProfile: () {},
-          onEmergencyType: () {},
-          onVoice: () {},
-          onDescribe: () {},
-          onCreateRoom: () {},
-          onJoinRoom: () {},
-        ),
-      ),
-    );
-
-    expect(find.text('Offline'), findsOneWidget);
+    expect(find.byType(MeshStatRail), findsNothing);
     expect(find.text('Active'), findsNothing);
+    expect(find.text('Offline'), findsNothing);
+    expect(find.text('Hold time'), findsNothing);
+    expect(find.text('4s'), findsNothing);
+    expect(find.text('Type'), findsNothing);
   });
 
   testWidgets('sending state switches the hero to the live ember accent', (

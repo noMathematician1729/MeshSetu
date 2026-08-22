@@ -99,11 +99,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       text: ref.read(gatewayDemoKeyProvider),
     );
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
-    EmergencyGestureSettings.startListeningForTypedSosGestures();
+    // Subscribe before declaring the native receiver ready: Android may flush
+    // a cold-start gesture immediately, and broadcast streams drop events
+    // emitted before their first listener is attached.
     _typedSosGestureSubscription = EmergencyGestureSettings.typedSosGestures
         .listen((emergencyType) {
           unawaited(_confirmGestureSosPacket(emergencyType));
         });
+    EmergencyGestureSettings.startListeningForTypedSosGestures();
     unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
     unawaited(_refreshGestureServiceState());
@@ -224,6 +227,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status =
               'MeshSetu\nCompact SOS received over BLE\nPacket $packet\nForwarding to admin and emergency contacts';
         });
+        final alert = _compactAlertFromData(data);
+        if (alert != null && !alert.isTest) {
+          SosIncidentNavigator.openCompactAlert(alert);
+        }
         unawaited(_forwardReceivedCealSos(data));
         // Belt-and-suspenders: also send device-native SMS immediately from
         // this phone's SIM so emergency contacts are notified even when the
@@ -387,6 +394,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         _receivedSosObjectId = received.envelope.objectId;
         _receivedSosSiteId = received.envelope.siteId;
       });
+      SosIncidentNavigator.openMeshIncident(
+        siteId: received.envelope.siteId,
+        eventId: received.envelope.eventId,
+        objectId: received.envelope.objectId,
+      );
     } catch (_) {
       // Only complete authenticated structured SOS payloads are displayed.
     }
@@ -783,6 +795,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         await Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => EmergencyActiveScreen(
+              eventId: eventId,
               locationStatus: locationResult.status,
               meshActive: _eventModeActive,
               delivery: tracker,

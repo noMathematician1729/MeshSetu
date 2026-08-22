@@ -6,6 +6,14 @@ import 'package:meshsetu_mobile/app/providers.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_repository.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_screen.dart';
 
+Future<void> _tapOnboardingButton(WidgetTester tester, String label) async {
+  final button = find.text(label);
+  await tester.drag(find.byType(ListView).first, const Offset(0, -600));
+  await tester.pumpAndSettle();
+  await tester.tap(button);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   const gestureChannel = MethodChannel('meshsetu/emergency-gestures');
 
@@ -30,24 +38,26 @@ void main() {
             OnboardingRepository(storage),
           ),
         ],
-        child: const MaterialApp(home: OnboardingScreen()),
+        child: const MaterialApp(
+          home: OnboardingScreen(requireGestureEnrollment: true),
+        ),
       ),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    final fields = find.byType(TextField);
-    await tester.enterText(fields.at(0), 'Asha Patel');
-    await tester.enterText(fields.at(1), '+919876543210');
-    await tester.enterText(fields.at(2), 'English');
-    await tester.enterText(fields.at(3), 'Ravi Patel');
-    await tester.enterText(fields.at(4), '+919876543211');
-    final save = find.text('Save emergency profile');
-    await tester.drag(find.byType(ListView), const Offset(0, -1200));
-    await tester.pump();
-    await tester.drag(find.byType(ListView), const Offset(0, -300));
-    await tester.pump();
-    await tester.tap(save);
-    await tester.pump();
+    expect(find.text('STEP 1 OF 4'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).at(0), 'Asha Patel');
+    await tester.enterText(find.byType(TextField).at(1), '+919876543210');
+    await tester.enterText(find.byType(TextField).at(2), 'English');
+    await _tapOnboardingButton(tester, 'Continue');
+
+    await tester.enterText(find.byType(TextField).at(0), 'Ravi Patel');
+    await tester.enterText(find.byType(TextField).at(1), '+919876543211');
+    await _tapOnboardingButton(tester, 'Continue');
+
+    expect(find.text('STEP 3 OF 4'), findsOneWidget);
+    expect(find.text('Not enabled'), findsOneWidget);
+    await _tapOnboardingButton(tester, 'Continue');
 
     expect(find.textContaining('Enable Emergency gestures'), findsOneWidget);
     expect(storage.value, isNull);

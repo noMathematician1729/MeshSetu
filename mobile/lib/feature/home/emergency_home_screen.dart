@@ -5,10 +5,9 @@ import '../../ui/components/mesh_components.dart';
 import '../../ui/theme/mesh_tokens.dart';
 
 /// Home tab hero. Signal-lattice hero surface with the SOS button as the
-/// unambiguous focal point, a status rail for mesh/peer state, a compact
-/// secondary-controls row, and a slim Rooms teaser (Rooms itself is a full
-/// tab as of Task 3 — this card just shortcuts create/join without
-/// duplicating the whole Rooms screen here).
+/// unambiguous focal point, compact secondary controls, and a slim Rooms
+/// teaser (Rooms itself is a full tab as of Task 3 — this card just shortcuts
+/// create/join without duplicating the whole Rooms screen here).
 ///
 /// Constructor signature is unchanged from the pre-revamp screen:
 /// [EventModeScreen] constructs this positionally with named args, and
@@ -89,34 +88,6 @@ class EmergencyHomeScreen extends StatelessWidget {
                         'One tap away from help',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                      const SizedBox(height: MeshSpace.lg),
-                      MeshStatRail(
-                        items: [
-                          MeshStatRailItem(
-                            label: 'Mesh',
-                            value: eventModeActive ? 'Active' : 'Offline',
-                            icon: eventModeActive
-                                ? Icons.bluetooth_connected
-                                : Icons.offline_bolt_outlined,
-                            tone: eventModeActive
-                                ? MeshStatusTone.active
-                                : MeshStatusTone.neutral,
-                          ),
-                          MeshStatRailItem(
-                            label: 'Hold time',
-                            value: '${holdSeconds}s',
-                            icon: Icons.timer_outlined,
-                          ),
-                          MeshStatRailItem(
-                            label: 'Type',
-                            value: emergencyType.label,
-                            icon: _iconFor(emergencyType),
-                            tone: emergencyType != SosEmergencyType.general
-                                ? MeshStatusTone.critical
-                                : MeshStatusTone.neutral,
-                          ),
-                        ],
                       ),
                       const SizedBox(height: MeshSpace.xl),
                       Center(

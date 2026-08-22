@@ -1,14 +1,21 @@
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:meshsetu_mobile/app/sos_delivery.dart';
+import 'package:meshsetu_mobile/app/providers.dart';
 import 'package:meshsetu_mobile/core/ble/sos_advertisement.dart';
+import 'package:meshsetu_mobile/core/data/database.dart';
 import 'package:meshsetu_mobile/feature/sos/compact_sos_packet_screen.dart';
 import 'package:meshsetu_mobile/feature/sos/emergency_active_screen.dart';
 import 'package:meshsetu_mobile/ui/components/mesh_components.dart';
 import 'package:meshsetu_mobile/ui/theme/mesh_theme.dart';
 
-Widget _wrap(Widget child) =>
-    MaterialApp(theme: MeshTheme.light(), home: child);
+Widget _wrap(Widget child, {List<Override> overrides = const []}) =>
+    ProviderScope(
+      overrides: overrides,
+      child: MaterialApp(theme: MeshTheme.light(), home: child),
+    );
 
 void main() {
   group('CompactSosPacketScreen', () {
@@ -53,130 +60,105 @@ void main() {
   });
 
   group('EmergencyActiveScreen', () {
-    testWidgets('shows mesh-connected step when mesh is active', (
-      tester,
-    ) async {
+    testWidgets('shows the scanning radar and location panel', (tester) async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
       await tester.pumpWidget(
         _wrap(
           const EmergencyActiveScreen(
             locationStatus: 'GPS captured',
             meshActive: true,
           ),
+          overrides: [databaseProvider.overrideWithValue(db)],
         ),
       );
+      await tester.pump();
 
-      expect(find.text('Emergency mesh connected'), findsOneWidget);
+      expect(find.text('Emergency Active'), findsWidgets);
+      expect(
+        find.textContaining('Scanning for nearby devices'),
+        findsOneWidget,
+      );
+      expect(find.text('Location'), findsOneWidget);
       expect(find.text('GPS captured'), findsOneWidget);
-      expect(find.text('Queued for emergency mesh'), findsNothing);
+      expect(find.byType(CustomPaint), findsWidgets);
+
+      // Drift schedules a zero-duration internal timer when a StreamBuilder's
+      // query stream is cancelled at teardown; give it one more pump cycle so
+      // flutter_test's strict `!timersPending` check doesn't fire against it.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 1));
     });
 
-    testWidgets('shows queued step and incomplete location when unavailable', (
+    testWidgets('shows scanning inactive when mesh is not active', (
       tester,
     ) async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
       await tester.pumpWidget(
         _wrap(
           const EmergencyActiveScreen(
             locationStatus: 'Location unavailable',
             meshActive: false,
           ),
-        ),
-      );
-
-      expect(find.text('Queued for emergency mesh'), findsOneWidget);
-      final steps = tester.widgetList<MeshEmergencyStep>(
-        find.byType(MeshEmergencyStep),
-      );
-      final locationStep = steps.firstWhere(
-        (step) => step.title == 'Location attached',
-      );
-      expect(locationStep.complete, isFalse);
-    });
-
-    testWidgets('does not claim delivery before a peer acknowledgement', (
-      tester,
-    ) async {
-      final tracker = SosDeliveryTracker(
-        const SosDeliveryStatus(
-          eventId: 'event-1',
-          objectId: 41,
-          phase: SosDeliveryPhase.queued,
-          locationStatus: 'GPS captured',
-        ),
-      );
-      addTearDown(tracker.dispose);
-      await tester.pumpWidget(
-        _wrap(
-          EmergencyActiveScreen(
-            locationStatus: 'GPS captured',
-            meshActive: true,
-            delivery: tracker,
-          ),
-        ),
-      );
-
-      expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
-      expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
-      expect(
-        tester
-            .widgetList<MeshEmergencyStep>(find.byType(MeshEmergencyStep))
-            .firstWhere((step) => step.title == 'Queued for emergency mesh')
-            .complete,
-        isFalse,
-      );
-
-      tracker.apply(
-        const SosDeliveryEvent(
-          kind: SosDeliveryEventKind.relayConfirmed,
-          objectId: 41,
-          eventId: 'event-1',
-          peerId: 'receiver-1',
+          overrides: [databaseProvider.overrideWithValue(db)],
         ),
       );
       await tester.pump();
 
-      expect(find.text('Emergency mesh delivery confirmed'), findsNWidgets(2));
-      expect(find.text('SOS saved · mesh relay pending'), findsNothing);
+      expect(find.text('Mesh scanning is not active'), findsOneWidget);
+      expect(find.text('Location unavailable'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 1));
     });
 
-    testWidgets(
-      'shows broadcast degradation without claiming remote delivery',
-      (tester) async {
-        final tracker = SosDeliveryTracker(
-          const SosDeliveryStatus(
-            eventId: 'event-2',
-            objectId: 42,
-            phase: SosDeliveryPhase.queued,
-            locationStatus: 'Location unavailable',
-          ),
-        );
-        addTearDown(tracker.dispose);
-        tracker.apply(
-          const SosDeliveryEvent(
-            kind: SosDeliveryEventKind.broadcastFailed,
-            objectId: 42,
-            detail: 'BLE advertiser rejected the campaign',
-          ),
-        );
-        await tester.pumpWidget(
-          _wrap(
-            EmergencyActiveScreen(
-              locationStatus: 'Location unavailable',
-              meshActive: true,
-              delivery: tracker,
+    testWidgets('renders a delivery panel when an eventId is provided', (
+      tester,
+    ) async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await db
+          .into(db.outboxEvents)
+          .insert(
+            OutboxEventsCompanion.insert(
+              eventId: 'evt-1',
+              siteId: 'site',
+              roomId: 'public',
+              payloadType: 'structuredSos',
+              priority: 'p0Critical',
+              state: const Value('acked'),
+              createdAtMs: now,
+              updatedAtMs: now,
+              expiresAtMs: now + 60000,
             ),
+          );
+      await tester.pumpWidget(
+        _wrap(
+          const EmergencyActiveScreen(
+            eventId: 'evt-1',
+            locationStatus: 'GPS captured',
+            meshActive: true,
           ),
-        );
+          overrides: [databaseProvider.overrideWithValue(db)],
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
 
-        expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
-        expect(
-          find.textContaining('Compact BLE broadcast unavailable'),
-          findsOneWidget,
-        );
-        expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
-      },
-    );
+      expect(find.text('Acknowledged by the mesh'), findsOneWidget);
+      // The radar sweep runs a repeating AnimationController, and Drift
+      // schedules a zero-duration internal timer when the delivery
+      // StreamBuilder's query stream is cancelled — settle both before the
+      // test ends so flutter_test's strict `!timersPending` check passes.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 1));
+    });
 
     testWidgets('return to home pops the screen', (tester) async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
       await tester.pumpWidget(
         _wrap(
           Scaffold(
@@ -186,7 +168,7 @@ void main() {
                   MaterialPageRoute(
                     builder: (_) => const EmergencyActiveScreen(
                       locationStatus: 'GPS captured',
-                      meshActive: true,
+                      meshActive: false,
                     ),
                   ),
                 ),
@@ -194,6 +176,7 @@ void main() {
               ),
             ),
           ),
+          overrides: [databaseProvider.overrideWithValue(db)],
         ),
       );
       await tester.tap(find.text('open'));
@@ -204,6 +187,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Emergency Active'), findsNothing);
       expect(find.text('open'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 1));
     });
   });
 }

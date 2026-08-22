@@ -16,8 +16,8 @@ import android.view.KeyEvent
  * where the typed red-SOS confirmation countdown must complete before send.
  *
  * Sequences are evaluated after [WINDOW_MS], rather than on each key press, so
- * prefix patterns never collide: for example ↓↓↓ is Fire while ↓↓↓↓ is a
- * Natural Disaster, and neither also fires an earlier partial sequence.
+ * a configured pattern is only triggered once the user pauses after its final
+ * press. Profile settings allow unique 2–5 press Volume up/down patterns.
  */
 class EmergencyGestureAccessibilityService : AccessibilityService() {
     companion object {
@@ -26,6 +26,16 @@ class EmergencyGestureAccessibilityService : AccessibilityService() {
         private const val COOLDOWN_MS = 3_000L
         private const val UP = 'U'
         private const val DOWN = 'D'
+        private const val GESTURE_PREFERENCES = "meshsetu_emergency_gestures"
+        private const val GESTURE_MAPPING_PREFIX = "gesture_mapping_"
+        private val DEFAULT_GESTURE_MAPPINGS = mapOf(
+            "normal" to "UU",
+            "fire" to "DDD",
+            "crime" to "UDU",
+            "kidnap" to "DUD",
+            "medical" to "UUU",
+            "natural_disaster" to "DDDD",
+        )
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -55,7 +65,7 @@ class EmergencyGestureAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now - lastKeyAtMs > WINDOW_MS) resetSequence()
         lastKeyAtMs = now
-        if (sequence.length < 4) sequence.append(key) else resetSequence()
+        if (sequence.length < 5) sequence.append(key) else resetSequence()
         handler.removeCallbacks(evaluateSequence)
         handler.postDelayed(evaluateSequence, WINDOW_MS)
         // Never block normal volume adjustment.
@@ -70,15 +80,9 @@ class EmergencyGestureAccessibilityService : AccessibilityService() {
     private fun dispatchCurrentSequence() {
         val pattern = sequence.toString()
         resetSequence()
-        val kind = when (pattern) {
-            "UU" -> "normal"
-            "DDD" -> "fire"
-            "UDU" -> "crime"
-            "DUD" -> "kidnap"
-            "UUU" -> "medical"
-            "DDDD" -> "natural_disaster"
-            else -> null
-        } ?: return
+        val kind = gestureMappings().entries.firstOrNull { (_, mappedPattern) ->
+            mappedPattern == pattern
+        }?.key ?: return
 
         val now = System.currentTimeMillis()
         if (now - lastTriggerAtMs < COOLDOWN_MS) return
@@ -94,6 +98,13 @@ class EmergencyGestureAccessibilityService : AccessibilityService() {
         }
         startActivity(launchIntent)
         Log.i(TAG, "Opened typed SOS confirmation for gesture: $kind")
+    }
+
+    private fun gestureMappings(): Map<String, String> {
+        val preferences = getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE)
+        return DEFAULT_GESTURE_MAPPINGS.mapValues { (kind, defaultPattern) ->
+            preferences.getString(GESTURE_MAPPING_PREFIX + kind, defaultPattern) ?: defaultPattern
+        }
     }
 
     private fun resetSequence() {

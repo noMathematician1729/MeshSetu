@@ -13,6 +13,7 @@ class MeshPage extends StatelessWidget {
     this.title,
     this.actions,
     this.scrollable = true,
+    this.maxWidth = 620,
     this.padding = const EdgeInsets.symmetric(
       horizontal: MeshSpace.screen,
       vertical: MeshSpace.md,
@@ -23,6 +24,7 @@ class MeshPage extends StatelessWidget {
   final String? title;
   final List<Widget>? actions;
   final bool scrollable;
+  final double maxWidth;
   final EdgeInsets padding;
 
   @override
@@ -32,7 +34,7 @@ class MeshPage extends StatelessWidget {
       child: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 620),
+          constraints: BoxConstraints(maxWidth: maxWidth),
           child: scrollable
               ? ListView(padding: padding, children: [child])
               : Padding(padding: padding, child: child),
@@ -175,12 +177,14 @@ class MeshCard extends StatelessWidget {
     this.padding = const EdgeInsets.all(MeshSpace.md),
     this.tint,
     this.onTap,
+    this.matte = false,
   });
 
   final Widget child;
   final EdgeInsets padding;
   final Color? tint;
   final VoidCallback? onTap;
+  final bool matte;
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +197,7 @@ class MeshCard extends StatelessWidget {
         // Dark mode: a faint 1px top highlight reads better on a near-black
         // canvas than a drop shadow, which turns murky. Light mode keeps the
         // soft resting shadow since it has room for it.
-        boxShadow: dark ? null : MeshShadows.resting,
+        boxShadow: dark || matte ? null : MeshShadows.resting,
       ),
       padding: padding,
       child: child,
@@ -653,6 +657,7 @@ class MeshFullWidthButton extends StatelessWidget {
     this.icon,
     this.secondary = false,
     this.busy = false,
+    this.matte = false,
   });
 
   final String label;
@@ -660,6 +665,7 @@ class MeshFullWidthButton extends StatelessWidget {
   final IconData? icon;
   final bool secondary;
   final bool busy;
+  final bool matte;
 
   @override
   Widget build(BuildContext context) {
@@ -679,11 +685,26 @@ class MeshFullWidthButton extends StatelessWidget {
               Flexible(child: Text(label)),
             ],
           );
+    final style = matte
+        ? const ButtonStyle(
+            elevation: WidgetStatePropertyAll(0),
+            shadowColor: WidgetStatePropertyAll(Colors.transparent),
+            surfaceTintColor: WidgetStatePropertyAll(Colors.transparent),
+          )
+        : null;
     return SizedBox(
       width: double.infinity,
       child: secondary
-          ? OutlinedButton(onPressed: busy ? null : onPressed, child: content)
-          : FilledButton(onPressed: busy ? null : onPressed, child: content),
+          ? OutlinedButton(
+              onPressed: busy ? null : onPressed,
+              style: style,
+              child: content,
+            )
+          : FilledButton(
+              onPressed: busy ? null : onPressed,
+              style: style,
+              child: content,
+            ),
     );
   }
 }

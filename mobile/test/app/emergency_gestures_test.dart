@@ -53,5 +53,34 @@ void main() {
         expect(await received, SosEmergencyType.medical);
       },
     );
+
+    test('default mappings are complete, unique, and valid', () {
+      expect(
+        validateEmergencyGestureMappings(defaultEmergencyGestureMappings),
+        isNull,
+      );
+      expect(defaultEmergencyGestureMappings[EmergencyGesture.normal], 'UU');
+      expect(
+        defaultEmergencyGestureMappings[EmergencyGesture.naturalDisaster],
+        'DDDD',
+      );
+    });
+
+    test('rejects mappings outside 2–5 presses or with duplicates', () {
+      final tooShort = Map<EmergencyGesture, String>.of(
+        defaultEmergencyGestureMappings,
+      )..[EmergencyGesture.normal] = 'U';
+      expect(validateEmergencyGestureMappings(tooShort), isNotNull);
+
+      final duplicate = Map<EmergencyGesture, String>.of(
+        defaultEmergencyGestureMappings,
+      )..[EmergencyGesture.fire] = 'UU';
+      expect(validateEmergencyGestureMappings(duplicate), isNotNull);
+
+      final fivePresses = Map<EmergencyGesture, String>.of(
+        defaultEmergencyGestureMappings,
+      )..[EmergencyGesture.fire] = 'DUDUD';
+      expect(validateEmergencyGestureMappings(fivePresses), isNull);
+    });
   });
 }

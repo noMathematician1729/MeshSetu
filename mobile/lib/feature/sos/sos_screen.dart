@@ -29,6 +29,7 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   final _textController = TextEditingController();
   final _voiceRecorder = VoiceRecorder.withCap(const Duration(seconds: 10));
   bool _sending = false;
+  bool _sendFailed = false;
   String? _status;
   String? _eventId;
 
@@ -43,7 +44,9 @@ class _SosScreenState extends ConsumerState<SosScreen> {
     if (_sending) return;
     setState(() {
       _sending = true;
-      _status = 'Persisting SOS draft…';
+      _sendFailed = false;
+      _eventId = null;
+      _status = 'Securing your emergency alert…';
     });
 
     try {
@@ -109,6 +112,7 @@ class _SosScreenState extends ConsumerState<SosScreen> {
       if (mounted) {
         setState(() {
           _sending = false;
+          _sendFailed = true;
           _status = 'SOS failed after draft persistence: $error';
         });
       }
@@ -122,7 +126,6 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   @override
   Widget build(BuildContext context) {
     final db = ref.watch(databaseProvider);
-    final palette = MeshPalette.of(context);
     return MeshPage(
       title: 'Send SOS',
       child: Column(
@@ -156,9 +159,11 @@ class _SosScreenState extends ConsumerState<SosScreen> {
           ),
           if (_status != null) ...[
             const SizedBox(height: MeshSpace.md),
-            MeshCard(
-              tint: palette.ember.withValues(alpha: 0.08),
-              child: Text(_status!),
+            _SosTransmissionPanel(
+              status: _status!,
+              sending: _sending,
+              failed: _sendFailed,
+              queued: _eventId != null,
             ),
           ],
           if (_eventId case final eventId?) ...[
@@ -187,4 +192,113 @@ class _SosScreenState extends ConsumerState<SosScreen> {
     'failed' => 'Delivery: local relay failed; restart Event Mode and retry.',
     _ => 'Delivery: preparing SOS for local storage.',
   };
+}
+
+class _SosTransmissionPanel extends StatelessWidget {
+  const _SosTransmissionPanel({
+    required this.status,
+    required this.sending,
+    required this.failed,
+    required this.queued,
+  });
+
+  final String status;
+  final bool sending;
+  final bool failed;
+  final bool queued;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    final (icon, color, label, title) = switch ((sending, failed, queued)) {
+      (true, _, _) => (
+        Icons.emergency_share_outlined,
+        palette.ember,
+        'Emergency transmission active',
+        'Preparing your SOS',
+      ),
+      (_, true, _) => (
+        Icons.error_outline,
+        palette.ember,
+        'Emergency alert needs attention',
+        'SOS could not be queued',
+      ),
+      (_, _, true) => (
+        Icons.check_circle_outline,
+        palette.live,
+        'Emergency alert secured',
+        'SOS ready for relay',
+      ),
+      _ => (Icons.info_outline, palette.textMuted, 'SOS update', 'SOS status'),
+    };
+
+    return AnimatedContainer(
+      duration: MeshMotion.standard,
+      curve: MeshMotion.easeOut,
+      child: MeshCard(
+        tint: color.withValues(alpha: 0.08),
+        child: Semantics(
+          liveRegion: true,
+          label: '$label. $status',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.14),
+                      shape: BoxShape.circle,
+                    ),
+                    child: sending
+                        ? Padding(
+                            padding: const EdgeInsets.all(11),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: color,
+                            ),
+                          )
+                        : Icon(icon, color: color, size: 24),
+                  ),
+                  const SizedBox(width: MeshSpace.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        MeshMicroLabel(label, color: color),
+                        const SizedBox(height: MeshSpace.xs),
+                        Text(
+                          title,
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: MeshSpace.md),
+              Text(status, style: Theme.of(context).textTheme.bodyMedium),
+              if (sending) ...[
+                const SizedBox(height: MeshSpace.md),
+                const Divider(height: 1),
+                const MeshEmergencyStep(
+                  title: 'Emergency packet is protected',
+                  detail: 'Your alert is saved on this phone before relay.',
+                  complete: true,
+                ),
+                MeshEmergencyStep(
+                  title: 'Preparing offline delivery',
+                  detail: 'Voice, location, and triage are being attached.',
+                  complete: false,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -9,6 +9,7 @@ import '../../ui/components/mesh_components.dart';
 import '../../ui/theme/mesh_tokens.dart';
 import '../../ui/theme/theme_controller.dart';
 import '../gateway/gateway_screen.dart';
+import 'gesture_mappings_screen.dart';
 import '../location/location_screen.dart';
 
 /// Fix for a pre-existing rendering issue (flagged in Task 3): the previous
@@ -106,6 +107,17 @@ class SettingsScreen extends ConsumerWidget {
                   subtitle: 'GPS accuracy and manual address',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const LocationScreen()),
+                  ),
+                ),
+                const Divider(height: MeshSpace.sm),
+                _NavRow(
+                  icon: Icons.tune_outlined,
+                  title: 'Reprogram gestures',
+                  subtitle: 'Set unique 2–5 press volume-button sequences',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const GestureMappingsScreen(),
+                    ),
                   ),
                 ),
                 const Divider(height: MeshSpace.sm),

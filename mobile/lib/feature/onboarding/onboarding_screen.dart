@@ -51,21 +51,50 @@ class OnboardingGate extends ConsumerWidget {
   }
 }
 
-/// Onboarding form. NOTE: `test/feature/onboarding_gesture_enrollment_test
-/// .dart` locks the TextField tab order (name, phone, language, first
-/// contact name, first contact phone), the root `ListView`, and the exact
-/// button/error strings ('Save emergency profile', 'Enable Emergency
-/// gestures...') — this rewrite is a restyle of that same single-scroll
-/// form rather than a multi-page wizard, to avoid rewriting that test's
-/// interaction model as an unrelated side effect of the visual revamp.
+/// Section-by-section onboarding for the sender emergency profile.
+///
+/// The profile remains a single locally persisted object, but the UI only
+/// presents one logical section at a time. This keeps the required identity
+/// and contact details focused while leaving optional medical information for
+/// the end of the flow.
 class OnboardingScreen extends ConsumerStatefulWidget {
-  const OnboardingScreen({super.key, this.initialProfile, this.onComplete});
+  const OnboardingScreen({
+    super.key,
+    this.initialProfile,
+    this.onComplete,
+    @visibleForTesting this.requireGestureEnrollment,
+  });
 
   final OnboardingProfile? initialProfile;
   final VoidCallback? onComplete;
 
+  /// Overrides platform detection in widget tests; production callers leave it
+  /// null so Android onboarding continues to use the real platform check.
+  @visibleForTesting
+  final bool? requireGestureEnrollment;
+
   @override
   ConsumerState<OnboardingScreen> createState() => _OnboardingScreenState();
+}
+
+enum _OnboardingSection { identity, contacts, gestures, medical }
+
+const _matteButtonStyle = ButtonStyle(
+  elevation: WidgetStatePropertyAll(0),
+  shadowColor: WidgetStatePropertyAll(Colors.transparent),
+  surfaceTintColor: WidgetStatePropertyAll(Colors.transparent),
+);
+
+final class _OnboardingStep {
+  const _OnboardingStep({
+    required this.section,
+    required this.title,
+    required this.icon,
+  });
+
+  final _OnboardingSection section;
+  final String title;
+  final IconData icon;
 }
 
 class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
@@ -81,10 +110,38 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
   bool _checkingGestures = false;
   bool _gestureServiceEnabled = false;
   String? _error;
+  int _sectionIndex = 0;
 
   bool get _requiresGestureEnrollment =>
-      widget.initialProfile == null &&
-      defaultTargetPlatform == TargetPlatform.android;
+      widget.requireGestureEnrollment ??
+      (widget.initialProfile == null &&
+          defaultTargetPlatform == TargetPlatform.android);
+
+  List<_OnboardingStep> get _steps => [
+    const _OnboardingStep(
+      section: _OnboardingSection.identity,
+      title: 'Your details',
+      icon: Icons.badge_outlined,
+    ),
+    const _OnboardingStep(
+      section: _OnboardingSection.contacts,
+      title: 'Emergency contacts',
+      icon: Icons.people_outline,
+    ),
+    if (_requiresGestureEnrollment)
+      const _OnboardingStep(
+        section: _OnboardingSection.gestures,
+        title: 'Emergency gestures',
+        icon: Icons.touch_app_outlined,
+      ),
+    const _OnboardingStep(
+      section: _OnboardingSection.medical,
+      title: 'Medical details',
+      icon: Icons.health_and_safety_outlined,
+    ),
+  ];
+
+  _OnboardingStep get _currentStep => _steps[_sectionIndex];
 
   @override
   void initState() {
@@ -153,12 +210,71 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     super.dispose();
   }
 
+  String? _validateCurrentSection() {
+    switch (_currentStep.section) {
+      case _OnboardingSection.identity:
+        if (_name.text.trim().isEmpty) return 'Enter your name.';
+        if (OnboardingProfile.canonicalE164(_phone.text) == null) {
+          return 'Enter your phone number in E.164 format, e.g. +919876543210.';
+        }
+        if (_language.text.trim().isEmpty) return 'Select a language.';
+      case _OnboardingSection.contacts:
+        if (_contacts.isEmpty) return 'Add at least one emergency contact.';
+        if (_contacts.length > 10) {
+          return 'A maximum of 10 emergency contacts is supported.';
+        }
+        for (final contact in _contacts) {
+          final error = EmergencyContact(
+            name: contact.name.text,
+            phone: contact.phone.text,
+          ).validationError;
+          if (error != null) return error;
+        }
+      case _OnboardingSection.gestures:
+        if (!_gestureServiceEnabled) {
+          return 'Enable Emergency gestures in Android Accessibility settings before continuing.';
+        }
+      case _OnboardingSection.medical:
+        break;
+    }
+    return null;
+  }
+
+  void _continue() {
+    final validationError = _validateCurrentSection();
+    if (validationError != null) {
+      setState(() => _error = validationError);
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    if (_sectionIndex < _steps.length - 1) {
+      setState(() {
+        _sectionIndex++;
+        _error = null;
+      });
+    } else {
+      unawaited(_save());
+    }
+  }
+
+  void _back() {
+    if (_sectionIndex == 0 || _saving) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _sectionIndex--;
+      _error = null;
+    });
+  }
+
   Future<void> _save() async {
     if (_saving) return;
     if (_requiresGestureEnrollment && !_gestureServiceEnabled) {
       setState(() {
         _error =
             'Enable Emergency gestures in Android Accessibility settings before saving your emergency profile.';
+        _sectionIndex = _steps.indexWhere(
+          (step) => step.section == _OnboardingSection.gestures,
+        );
       });
       return;
     }
@@ -205,146 +321,264 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
   @override
   Widget build(BuildContext context) {
     final palette = MeshPalette.of(context);
+    final progress = (_sectionIndex + 1) / _steps.length;
     return MeshPage(
       title: widget.initialProfile == null
           ? 'Emergency Profile'
           : 'Edit Profile',
+      maxWidth: 720,
+      padding: const EdgeInsets.fromLTRB(
+        MeshSpace.screen,
+        MeshSpace.lg,
+        MeshSpace.screen,
+        MeshSpace.xl,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          MeshCard(
-            tint: palette.primary.withValues(alpha: 0.08),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.health_and_safety_outlined, color: palette.primary),
-                const SizedBox(width: MeshSpace.sm),
-                Expanded(
-                  child: Text(
-                    'This encrypted information travels with your SOS and stays on this device.',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ),
-              ],
+          _progressHeader(context, palette, progress),
+          const SizedBox(height: MeshSpace.lg),
+          AnimatedSwitcher(
+            duration: MeshMotion.standard,
+            switchInCurve: MeshMotion.easeOut,
+            switchOutCurve: MeshMotion.easeOut,
+            transitionBuilder: (child, animation) => FadeTransition(
+              opacity: animation,
+              child: SlideTransition(
+                position:
+                    Tween<Offset>(
+                      begin: const Offset(0.04, 0),
+                      end: Offset.zero,
+                    ).animate(
+                      CurvedAnimation(
+                        parent: animation,
+                        curve: MeshMotion.easeOut,
+                      ),
+                    ),
+                child: child,
+              ),
+            ),
+            child: KeyedSubtree(
+              key: ValueKey(_currentStep.section),
+              child: _sectionContent(context, palette),
             ),
           ),
-          const SizedBox(height: MeshSpace.lg),
-          const MeshMicroLabel('Identity'),
-          const SizedBox(height: MeshSpace.sm),
-          _field(_name, 'Your name', required: true),
-          const SizedBox(height: MeshSpace.sm),
-          _field(
-            _phone,
-            'Your phone number',
-            required: true,
-            keyboardType: TextInputType.phone,
-            helperText: 'Include country code, e.g. +919876543210',
-          ),
-          const SizedBox(height: MeshSpace.sm),
-          _field(_language, 'Preferred language', required: true),
-          const SizedBox(height: MeshSpace.lg),
-          MeshSectionTitle(
-            'Emergency contacts',
-            subtitle: 'People notified when you send an SOS',
-          ),
-          for (var index = 0; index < _contacts.length; index++) ...[
-            _contactFields(index),
-            const SizedBox(height: MeshSpace.sm),
+          if (_error != null) ...[
+            const SizedBox(height: MeshSpace.md),
+            _errorMessage(context, palette),
           ],
-          if (_contacts.length < 10)
-            OutlinedButton.icon(
-              onPressed: () =>
-                  setState(() => _contacts.add(_ContactEditors())),
-              icon: const Icon(Icons.add),
-              label: const Text('Add emergency contact'),
-            ),
-          if (_requiresGestureEnrollment) ...[
-            const SizedBox(height: MeshSpace.lg),
-            MeshCard(
-              tint: _gestureServiceEnabled
-                  ? palette.live.withValues(alpha: 0.1)
-                  : palette.ember.withValues(alpha: 0.08),
+          const SizedBox(height: MeshSpace.lg),
+          _navigation(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _progressHeader(
+    BuildContext context,
+    MeshPalette palette,
+    double progress,
+  ) => MeshCard(
+    matte: true,
+    tint: palette.mesh.withValues(alpha: 0.08),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(_currentStep.icon, color: palette.mesh),
+            const SizedBox(width: MeshSpace.sm),
+            Expanded(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  MeshMicroLabel(
+                    'Step ${_sectionIndex + 1} of ${_steps.length}',
+                  ),
+                  const SizedBox(height: 2),
                   Text(
-                    'Required: emergency gestures',
+                    _currentStep.title,
                     style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: MeshSpace.xs),
-                  const Text(
-                    'Enable MeshSetu emergency gestures in Android Accessibility settings. '
-                    '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence while Event Mode is active—even after the app UI is closed.',
-                  ),
-                  const SizedBox(height: MeshSpace.sm),
-                  MeshStatusPill(
-                    label: _checkingGestures
-                        ? 'Checking permission…'
-                        : _gestureServiceEnabled
-                        ? 'Enabled'
-                        : 'Not enabled',
-                    tone: _checkingGestures
-                        ? MeshStatusTone.neutral
-                        : _gestureServiceEnabled
-                        ? MeshStatusTone.active
-                        : MeshStatusTone.critical,
-                  ),
-                  const SizedBox(height: MeshSpace.sm),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: _checkingGestures
-                              ? null
-                              : _openGestureSettings,
-                          icon: const Icon(Icons.settings_accessibility),
-                          label: const Text(
-                            'Open Accessibility settings',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: MeshSpace.sm),
-                      IconButton(
-                        tooltip: 'Check again',
-                        onPressed: _checkingGestures
-                            ? null
-                            : _refreshGestureEnrollment,
-                        icon: const Icon(Icons.refresh),
-                      ),
-                    ],
                   ),
                 ],
               ),
             ),
-          ],
-          const SizedBox(height: MeshSpace.lg),
-          MeshSectionTitle(
-            'Medical information',
-            subtitle: 'Optional, but helps responders act quickly',
-          ),
-          _field(_bloodGroup, 'Blood group'),
-          const SizedBox(height: MeshSpace.sm),
-          _field(_allergies, 'Allergies', maxLines: 2),
-          const SizedBox(height: MeshSpace.sm),
-          _field(_conditions, 'Medical conditions', maxLines: 2),
-          if (_error != null) ...[
-            const SizedBox(height: MeshSpace.md),
-            Text(
-              _error!,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: palette.ember),
+            MeshStatusPill(
+              label: '${(_sectionIndex + 1) * 100 ~/ _steps.length}%',
+              tone: MeshStatusTone.neutral,
             ),
           ],
-          const SizedBox(height: MeshSpace.lg),
-          MeshFullWidthButton(
-            label: _saving ? 'Saving profile…' : 'Save emergency profile',
-            busy: _saving,
-            onPressed: _save,
+        ),
+        const SizedBox(height: MeshSpace.md),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(MeshRadius.full),
+          child: LinearProgressIndicator(
+            value: progress,
+            minHeight: 6,
+            backgroundColor: palette.hairline,
           ),
-        ],
+        ),
+      ],
+    ),
+  );
+
+  Widget _sectionContent(BuildContext context, MeshPalette palette) =>
+      switch (_currentStep.section) {
+        _OnboardingSection.identity => _identitySection(context),
+        _OnboardingSection.contacts => _contactsSection(context),
+        _OnboardingSection.gestures => _gesturesSection(context, palette),
+        _OnboardingSection.medical => _medicalSection(context),
+      };
+
+  Widget _identitySection(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const MeshSectionTitle('Who are we helping?'),
+      const SizedBox(height: MeshSpace.sm),
+      _field(_name, 'Your name', required: true),
+      const SizedBox(height: MeshSpace.md),
+      _field(
+        _phone,
+        'Your phone number',
+        required: true,
+        keyboardType: TextInputType.phone,
       ),
+      const SizedBox(height: MeshSpace.md),
+      _field(_language, 'Preferred language', required: true),
+    ],
+  );
+
+  Widget _contactsSection(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const MeshSectionTitle('People in your circle'),
+      for (var index = 0; index < _contacts.length; index++) ...[
+        _contactFields(index),
+        const SizedBox(height: MeshSpace.md),
+      ],
+      if (_contacts.length < 10) ...[
+        const SizedBox(height: MeshSpace.sm),
+        OutlinedButton.icon(
+          style: _matteButtonStyle,
+          onPressed: () => setState(() => _contacts.add(_ContactEditors())),
+          icon: const Icon(Icons.add),
+          label: const Text('Add emergency contact'),
+        ),
+      ],
+    ],
+  );
+
+  Widget _gesturesSection(
+    BuildContext context,
+    MeshPalette palette,
+  ) => MeshCard(
+    matte: true,
+    tint: _gestureServiceEnabled
+        ? palette.live.withValues(alpha: 0.1)
+        : palette.ember.withValues(alpha: 0.08),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Enable emergency gestures',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: MeshSpace.sm),
+        const Text(
+          'Enable MeshSetu emergency gestures in Android Accessibility settings. '
+          '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster.',
+        ),
+        const SizedBox(height: MeshSpace.lg),
+        MeshStatusPill(
+          label: _checkingGestures
+              ? 'Checking permission…'
+              : _gestureServiceEnabled
+              ? 'Enabled'
+              : 'Not enabled',
+          tone: _checkingGestures
+              ? MeshStatusTone.neutral
+              : _gestureServiceEnabled
+              ? MeshStatusTone.active
+              : MeshStatusTone.critical,
+        ),
+        const SizedBox(height: MeshSpace.lg),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                style: _matteButtonStyle,
+                onPressed: _checkingGestures ? null : _openGestureSettings,
+                icon: const Icon(Icons.settings_accessibility),
+                label: const Text(
+                  'Open Accessibility settings',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            IconButton(
+              tooltip: 'Check again',
+              onPressed: _checkingGestures ? null : _refreshGestureEnrollment,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+
+  Widget _medicalSection(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const MeshSectionTitle('Optional medical context'),
+      const SizedBox(height: MeshSpace.sm),
+      _field(_bloodGroup, 'Blood group'),
+      const SizedBox(height: MeshSpace.md),
+      _field(_allergies, 'Allergies', maxLines: 2),
+      const SizedBox(height: MeshSpace.md),
+      _field(_conditions, 'Medical conditions', maxLines: 2),
+    ],
+  );
+
+  Widget _errorMessage(BuildContext context, MeshPalette palette) => Text(
+    _error!,
+    style: Theme.of(
+      context,
+    ).textTheme.bodyMedium?.copyWith(color: palette.ember),
+  );
+
+  Widget _navigation(BuildContext context) {
+    final isLast = _sectionIndex == _steps.length - 1;
+    return Row(
+      children: [
+        if (_sectionIndex > 0) ...[
+          Expanded(
+            child: MeshFullWidthButton(
+              matte: true,
+              label: 'Back',
+              icon: Icons.arrow_back,
+              secondary: true,
+              onPressed: _saving ? null : _back,
+            ),
+          ),
+          const SizedBox(width: MeshSpace.sm),
+        ],
+        Expanded(
+          flex: _sectionIndex > 0 ? 2 : 1,
+          child: MeshFullWidthButton(
+            matte: true,
+            label: isLast
+                ? _saving
+                      ? 'Saving profile…'
+                      : 'Save emergency profile'
+                : 'Continue',
+            icon: isLast ? Icons.check : Icons.arrow_forward,
+            busy: _saving,
+            onPressed: _continue,
+          ),
+        ),
+      ],
     );
   }
 
@@ -354,20 +588,20 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     bool required = false,
     int maxLines = 1,
     TextInputType? keyboardType,
-    String? helperText,
   }) => TextField(
     controller: controller,
     maxLines: maxLines,
     keyboardType: keyboardType,
-    decoration: InputDecoration(
-      labelText: required ? '$label *' : label,
-      helperText: helperText,
-    ),
+    onChanged: (_) {
+      if (_error != null) setState(() => _error = null);
+    },
+    decoration: InputDecoration(labelText: required ? '$label *' : label),
   );
 
   Widget _contactFields(int index) {
     final contact = _contacts[index];
     return MeshCard(
+      matte: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -390,15 +624,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
                 ),
             ],
           ),
-          const SizedBox(height: MeshSpace.xs),
-          _field(contact.name, 'Name', required: true),
           const SizedBox(height: MeshSpace.sm),
+          _field(contact.name, 'Name', required: true),
+          const SizedBox(height: MeshSpace.md),
           _field(
             contact.phone,
             'Phone number',
             required: true,
             keyboardType: TextInputType.phone,
-            helperText: 'Include country code, e.g. +919876543210',
           ),
         ],
       ),

@@ -77,6 +77,14 @@ class MeshDatabase extends _$MeshDatabase {
     outboxEvents,
   )..where((t) => t.siteId.equals(siteId) & t.state.equals('ready'))).watch();
 
+  /// Watches a single outbox row by [eventId] — e.g. the emergency active
+  /// screen's delivery status for the SOS it just queued. Emits null once
+  /// the row no longer exists (should not normally happen; rows are never
+  /// deleted, only state-transitioned).
+  Stream<OutboxEvent?> watchEvent(String eventId) => (select(
+    outboxEvents,
+  )..where((t) => t.eventId.equals(eventId))).watchSingleOrNull();
+
   Stream<List<OutboxEvent>> watchRoom(String siteId, String roomId) =>
       (select(outboxEvents)
             ..where((t) => t.siteId.equals(siteId) & t.roomId.equals(roomId))

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/ble/sos_advertisement.dart';
 import '../feature/sos/compact_sos_packet_screen.dart';
+import '../feature/sos/incident_detail_screen.dart';
 import '../feature/sos/sos_incident_screen.dart';
 
 /// App-owned deep-link format used as the payload of SOS notifications.
@@ -14,6 +15,7 @@ abstract final class SosIncidentNavigator {
   static final GlobalKey<NavigatorState> key = GlobalKey<NavigatorState>();
   static String? _pendingEventId;
   static MeshSosAdvertisement? _pendingCompactAlert;
+  static ({String siteId, String eventId, int objectId})? _pendingMeshIncident;
 
   static String payloadForEvent(String eventId) =>
       '$_scheme://$_host/${Uri.encodeComponent(eventId)}';
@@ -97,6 +99,21 @@ abstract final class SosIncidentNavigator {
     _pendingEventId = eventId;
   }
 
+  /// Opens an authenticated SOS received through the local mesh inbox.
+  ///
+  /// Structured SOS objects are persisted before Event Mode forwards them to
+  /// the UI, so [IncidentDetailScreen] can render their verified payload even
+  /// if this device has no control-room connection.
+  static void openMeshIncident({
+    required String siteId,
+    required String eventId,
+    required int objectId,
+  }) {
+    final incident = (siteId: siteId, eventId: eventId, objectId: objectId);
+    if (_pushMeshIncident(incident)) return;
+    _pendingMeshIncident = incident;
+  }
+
   /// Flushes a tap that arrived before the navigator existed.
   static void openPending() {
     final eventId = _pendingEventId;
@@ -106,9 +123,15 @@ abstract final class SosIncidentNavigator {
       return;
     }
     final compactAlert = _pendingCompactAlert;
-    if (compactAlert == null) return;
-    if (_pushCompactAlert(compactAlert)) return;
-    _pendingCompactAlert = compactAlert;
+    if (compactAlert != null) {
+      if (_pushCompactAlert(compactAlert)) return;
+      _pendingCompactAlert = compactAlert;
+      return;
+    }
+    final incident = _pendingMeshIncident;
+    if (incident == null) return;
+    if (_pushMeshIncident(incident)) return;
+    _pendingMeshIncident = incident;
   }
 
   static bool _pushCompactAlert(MeshSosAdvertisement alert) {
@@ -119,6 +142,25 @@ abstract final class SosIncidentNavigator {
       MaterialPageRoute<void>(
         builder: (_) => CompactSosPacketScreen(alert: alert),
         settings: RouteSettings(name: '/sos-packet/${alert.dedupeKey}'),
+      ),
+    );
+    return true;
+  }
+
+  static bool _pushMeshIncident(
+    ({String siteId, String eventId, int objectId}) incident,
+  ) {
+    final navigator = key.currentState;
+    if (navigator == null) return false;
+    _pendingMeshIncident = null;
+    navigator.push(
+      MaterialPageRoute<void>(
+        builder: (_) => IncidentDetailScreen(
+          siteId: incident.siteId,
+          eventId: incident.eventId,
+          objectId: incident.objectId,
+        ),
+        settings: RouteSettings(name: '/mesh-sos/${incident.eventId}'),
       ),
     );
     return true;

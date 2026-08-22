@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -19,6 +20,45 @@ import 'sos_alert_notifications.dart';
 import 'sos_delivery.dart';
 import 'sos_incident_navigator.dart';
 
+/// Snapshot of a single mesh peer, mirrored from the foreground task's
+/// `mesh_peers` payload (see `app/mesh_event_task.dart`). Used by screens
+/// that need to render individual nearby devices — e.g. the emergency
+/// active radar — rather than just an aggregate [MeshStatus.peerCount].
+class MeshPeerSnapshot {
+  const MeshPeerSnapshot({
+    required this.peerId,
+    required this.connected,
+    required this.rssi,
+    required this.lastSeenMs,
+  });
+
+  final String peerId;
+  final bool connected;
+
+  /// Raw BLE RSSI in dBm, or null if the platform did not report one for
+  /// this peer (e.g. server-side sessions before a scan result arrives).
+  final int? rssi;
+  final int lastSeenMs;
+
+  /// Rough distance estimate in meters from [rssi], using the standard
+  /// log-distance path-loss model with a 1-meter reference RSSI of -59 dBm
+  /// (a common BLE beacon calibration value) and an environmental path-loss
+  /// exponent of 2.5 (indoor/obstructed, between free-space 2.0 and
+  /// heavily-obstructed 4.0). This is an approximation only — BLE RSSI is
+  /// noisy and affected by orientation, body attenuation, and multipath —
+  /// so callers should present it as a range/estimate, never a precise
+  /// measurement.
+  double? get estimatedDistanceMeters {
+    final value = rssi;
+    if (value == null) return null;
+    const txPowerAtOneMeter = -59;
+    const pathLossExponent = 2.5;
+    return math
+        .pow(10, (txPowerAtOneMeter - value) / (10 * pathLossExponent))
+        .toDouble();
+  }
+}
+
 /// Snapshot of the foreground mesh service's connectivity, observable from
 /// the UI isolate without polling. Room screens use this as the primary
 /// delivery signal instead of the internet-only [RoomPresenceSocket] status
@@ -31,6 +71,7 @@ class MeshStatus {
     required this.statusText,
     this.blockedReason,
     this.siteMismatchDetected = false,
+    this.peers = const [],
   });
 
   static const stopped = MeshStatus(
@@ -58,6 +99,10 @@ class MeshStatus {
   /// current, not historical, conditions.
   final bool siteMismatchDetected;
 
+  /// Per-peer detail behind [peerCount], most-recently-seen first. Empty
+  /// until the first `mesh_peers` message arrives from the foreground task.
+  final List<MeshPeerSnapshot> peers;
+
   MeshStatus copyWith({
     bool? eventModeRunning,
     int? peerCount,
@@ -65,6 +110,7 @@ class MeshStatus {
     String? blockedReason,
     bool clearBlockedReason = false,
     bool? siteMismatchDetected,
+    List<MeshPeerSnapshot>? peers,
   }) => MeshStatus(
     eventModeRunning: eventModeRunning ?? this.eventModeRunning,
     peerCount: peerCount ?? this.peerCount,
@@ -73,6 +119,7 @@ class MeshStatus {
         ? null
         : (blockedReason ?? this.blockedReason),
     siteMismatchDetected: siteMismatchDetected ?? this.siteMismatchDetected,
+    peers: peers ?? this.peers,
   );
 }
 
@@ -367,13 +414,24 @@ class MeshBridgeClient {
       case 'mesh_peers':
         final peers = data['peers'];
         if (peers is! List) return;
+        final peerMaps = peers.whereType<Map>().toList();
+        final snapshots = [
+          for (final peer in peerMaps)
+            MeshPeerSnapshot(
+              peerId: '${peer['peerId'] ?? ''}',
+              connected: peer['connected'] == null || peer['connected'] == true,
+              rssi: (peer['rssi'] as num?)?.toInt(),
+              lastSeenMs: (peer['lastSeenMs'] as num?)?.toInt() ?? 0,
+            ),
+        ]..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
         _updateMeshStatus(
           (current) => current.copyWith(
             eventModeRunning: true,
-            peerCount: peers.whereType<Map>().where((peer) {
+            peerCount: peerMaps.where((peer) {
               final connected = peer['connected'];
               return connected == null || connected == true;
             }).length,
+            peers: snapshots,
           ),
         );
       case 'mesh_metric':

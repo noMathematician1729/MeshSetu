@@ -24,6 +24,15 @@ class MainActivity : FlutterActivity() {
         const val EXTRA_EMERGENCY_GESTURE = "emergency_gesture"
         private const val GESTURE_PREFERENCES = "meshsetu_emergency_gestures"
         private const val PENDING_TYPED_SOS_GESTURE = "pending_typed_sos_gesture"
+        private const val GESTURE_MAPPING_PREFIX = "gesture_mapping_"
+        private val DEFAULT_GESTURE_MAPPINGS = mapOf(
+            "normal" to "UU",
+            "fire" to "DDD",
+            "crime" to "UDU",
+            "kidnap" to "DUD",
+            "medical" to "UUU",
+            "natural_disaster" to "DDDD",
+        )
         private const val TAG = "MeshSetuMainActivity"
     }
 
@@ -105,6 +114,21 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isEnabled" -> result.success(isEmergencyGestureServiceEnabled())
+                    "getGestureMappings" -> result.success(gestureMappings())
+                    "saveGestureMappings" -> {
+                        val mappings = call.arguments as? Map<*, *>
+                        val error = validateAndSaveGestureMappings(mappings)
+                        if (error == null) result.success(null)
+                        else result.error("INVALID_GESTURES", error, null)
+                    }
+                    "resetGestureMappings" -> {
+                        val editor = getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE).edit()
+                        DEFAULT_GESTURE_MAPPINGS.keys.forEach { key ->
+                            editor.remove(GESTURE_MAPPING_PREFIX + key)
+                        }
+                        editor.apply()
+                        result.success(null)
+                    }
                     "openSettings" -> {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         result.success(null)
@@ -120,6 +144,33 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun gestureMappings(): Map<String, String> {
+        val preferences = getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE)
+        return DEFAULT_GESTURE_MAPPINGS.mapValues { (kind, defaultPattern) ->
+            preferences.getString(GESTURE_MAPPING_PREFIX + kind, defaultPattern) ?: defaultPattern
+        }
+    }
+
+    private fun validateAndSaveGestureMappings(mappings: Map<*, *>?): String? {
+        if (mappings == null || mappings.size != DEFAULT_GESTURE_MAPPINGS.size ||
+            !DEFAULT_GESTURE_MAPPINGS.keys.all { mappings.containsKey(it) }) {
+            return "Set a mapping for every emergency type."
+        }
+        val patterns = mutableSetOf<String>()
+        val editor = getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE).edit()
+        for (kind in DEFAULT_GESTURE_MAPPINGS.keys) {
+            val pattern = mappings[kind] as? String
+                ?: return "Each mapping must be a button sequence."
+            if (!Regex("^[UD]{2,5}$").matches(pattern)) {
+                return "Gestures must contain 2–5 Volume up/down presses."
+            }
+            if (!patterns.add(pattern)) return "Each emergency type needs a different sequence."
+            editor.putString(GESTURE_MAPPING_PREFIX + kind, pattern)
+        }
+        editor.apply()
+        return null
     }
 
     private fun captureTypedSosGesture(intent: Intent?) {
