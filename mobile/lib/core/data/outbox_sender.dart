@@ -6,6 +6,23 @@ import '../model/model.dart';
 import '../protocol/relay_engine.dart';
 import 'database.dart';
 
+/// Thrown when an outbox row cannot be handed to the mesh right now for a
+/// reason that is expected to clear on its own — the BLE foreground service
+/// is not running yet, or it has not acknowledged the submission.
+///
+/// This is deliberately distinct from a rejection: a room message or SOS must
+/// not be marked permanently `failed` just because the radio was still
+/// starting when the user hit send. [OutboxSender] retries these without
+/// consuming a delivery attempt.
+class MeshTransportUnavailable implements Exception {
+  const MeshTransportUnavailable(this.reason);
+
+  final String reason;
+
+  @override
+  String toString() => 'MeshTransportUnavailable: $reason';
+}
+
 /// Drains `state = ready` [OutboxEvents] rows through a caller-supplied
 /// `send` callback and reflects ACK/expiry metrics back onto the row,
 /// implementing the CREATED -> READY -> RELAYING -> ACKED|EXPIRED state
@@ -25,6 +42,7 @@ class OutboxSender {
     required this.localEphemeralId,
     this.maxAttempts = 5,
     this.retryBaseDelay = const Duration(seconds: 1),
+    this.transportRetryDelay = const Duration(seconds: 5),
     this.onDeliveryFailure,
   }) : assert(maxAttempts > 0),
        assert(retryBaseDelay > Duration.zero);
@@ -35,6 +53,10 @@ class OutboxSender {
   final int localEphemeralId;
   final int maxAttempts;
   final Duration retryBaseDelay;
+
+  /// Retry spacing used while the transport itself is unavailable, where
+  /// attempts are not counted against [maxAttempts].
+  final Duration transportRetryDelay;
   final void Function(OutboxEvent row, Object error)? onDeliveryFailure;
 
   StreamSubscription<List<OutboxEvent>>? _sub;
@@ -157,9 +179,16 @@ class OutboxSender {
       );
       _attempts.remove(row.eventId);
     } catch (error) {
-      final attempt = (_attempts[row.eventId] ?? 0) + 1;
-      _attempts[row.eventId] = attempt;
-      if (attempt >= maxAttempts) {
+      // A radio that has not started yet is not a delivery failure. Keeping
+      // the attempt counter untouched means a message typed a moment before
+      // Event Mode came up still goes out, instead of dying after five fast
+      // retries and needing the user to retype it.
+      final consumesAttempt = error is! MeshTransportUnavailable;
+      final attempt = consumesAttempt
+          ? (_attempts[row.eventId] ?? 0) + 1
+          : (_attempts[row.eventId] ?? 0);
+      if (consumesAttempt) _attempts[row.eventId] = attempt;
+      if (consumesAttempt && attempt >= maxAttempts) {
         _attempts.remove(row.eventId);
         await _db.markState(
           row.eventId,
@@ -173,7 +202,9 @@ class OutboxSender {
       // a stopped foreground task cannot spin the same row forever. A later
       // bridge restart can drain the READY row again because the retry state
       // is deliberately local to this sender instance.
-      final delay = retryBaseDelay * (1 << (attempt - 1).clamp(0, 4));
+      final delay = consumesAttempt
+          ? retryBaseDelay * (1 << (attempt - 1).clamp(0, 4))
+          : transportRetryDelay;
       final retryAt =
           DateTime.now().millisecondsSinceEpoch + delay.inMilliseconds;
       _retryAfterMs[row.eventId] = retryAt;

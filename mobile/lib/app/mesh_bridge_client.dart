@@ -369,7 +369,7 @@ class MeshBridgeClient {
       return;
     }
     if (!await FlutterForegroundTask.isRunningService) {
-      throw StateError('event mode is not running');
+      throw const MeshTransportUnavailable('event mode is not running');
     }
     final pending = Completer<void>();
     _pendingSubmissions[envelope.objectId] = pending;
@@ -378,7 +378,9 @@ class MeshBridgeClient {
       () {
         if (!pending.isCompleted) {
           pending.completeError(
-            StateError('foreground mesh did not accept the object'),
+            const MeshTransportUnavailable(
+              'foreground mesh did not acknowledge the object',
+            ),
           );
         }
         _pendingSubmissions.remove(envelope.objectId);
@@ -560,7 +562,9 @@ class MeshBridgeClient {
       case 'error' || 'stopped':
         _updateMeshStatus((_) => MeshStatus.stopped);
         _failPendingSubmissions(
-          StateError(data['message'] as String? ?? 'foreground mesh stopped'),
+          MeshTransportUnavailable(
+            data['message'] as String? ?? 'foreground mesh stopped',
+          ),
         );
     }
   }
@@ -882,7 +886,9 @@ class MeshBridgeClient {
     }
     await _outbox?.dispose();
     _outbox = null;
-    _failPendingSubmissions(StateError('mesh bridge disposed'));
+    _failPendingSubmissions(
+      const MeshTransportUnavailable('mesh bridge disposed'),
+    );
     _siteId = null;
     _localEphemeralId = null;
     _storedObjectIds.clear();

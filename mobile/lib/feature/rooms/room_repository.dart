@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:uuid/uuid.dart';
 
 import '../../core/data/database.dart';
@@ -260,6 +261,18 @@ class RoomRepository {
       displayName: displayName.trim(),
       joinedAtMs: now,
     );
+    // Replace this device's previous undelivered announcement for the room
+    // instead of stacking one row per re-announce: only the newest presence
+    // packet is worth radio time, and peers dedupe by member ID anyway.
+    await (_db.delete(_db.outboxEvents)..where(
+          (t) =>
+              t.siteId.equals(siteId) &
+              t.roomId.equals(roomId) &
+              t.payloadType.equals(PayloadType.responderUpdate.name) &
+              t.rawText.equals(member.displayName) &
+              t.state.isNotValue('acked'),
+        ))
+        .go();
     await _db
         .into(_db.outboxEvents)
         .insert(
@@ -276,6 +289,27 @@ class RoomRepository {
             createdAtMs: now,
             updatedAtMs: now,
             expiresAtMs: now + const Duration(hours: 24).inMilliseconds,
+          ),
+        );
+  }
+
+  /// Returns messages this device failed to deliver to the queue so they are
+  /// retried. A `failed` row is otherwise dead: nothing re-drains it, which
+  /// meant a message typed before the radio was ready was lost for good.
+  Future<int> retryFailedMessages(String roomId) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return (_db.update(_db.outboxEvents)..where(
+          (t) =>
+              t.siteId.equals(siteId) &
+              t.roomId.equals(roomId) &
+              t.payloadType.equals(PayloadType.roomMessage.name) &
+              t.state.equals('failed') &
+              t.expiresAtMs.isBiggerThanValue(now),
+        ))
+        .write(
+          OutboxEventsCompanion(
+            state: const Value('ready'),
+            updatedAtMs: Value(now),
           ),
         );
   }
@@ -474,8 +508,18 @@ class RoomRepository {
         atMs: row.receivedAtMs,
         mine: false,
       );
-    } catch (_) {
-      // Invalid/tampered room packets never reach the UI.
+    } catch (error) {
+      // Invalid/tampered room packets never reach the UI. This is also what a
+      // site-key or room-name mismatch looks like, so it is logged in debug
+      // builds: silently discarding here made "messages arrive but nothing
+      // shows" impossible to tell apart from "nothing arrived".
+      assert(() {
+        debugPrint(
+          'RoomRepository: dropped inbox message ${row.eventId} '
+          'for ${row.siteId}/${row.roomId}: $error',
+        );
+        return true;
+      }());
       return null;
     }
   }

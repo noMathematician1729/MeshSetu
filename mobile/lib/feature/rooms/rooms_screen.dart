@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,14 +11,28 @@ import '../join/manifest.dart';
 import 'room_lobby_screen.dart';
 import 'room_policy.dart';
 
+/// Derives a room ID that is identical on every phone that creates the same
+/// room name.
+///
+/// This used to append `DateTime.now()`, which guaranteed divergence: two
+/// people creating "Medical Bay" in the same event got different room IDs and
+/// could never see each other's presence or messages, because both are
+/// filtered by exact room ID. A stable digest keeps IDs collision-resistant
+/// while making the same name mean the same room, so a typed mesh code is
+/// enough to meet in a room without scanning a QR.
 String _roomIdFromName(String name) {
   final slug = name
       .trim()
       .toLowerCase()
       .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
       .replaceAll(RegExp(r'^-+|-+$'), '');
-  final suffix = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-  return '${slug.isEmpty ? 'room' : slug}-$suffix';
+  final normalized = slug.isEmpty ? 'room' : slug;
+  final digest = sha256.convert(utf8.encode('meshsetu-room-v1:$normalized'));
+  final suffix = digest.bytes
+      .take(2)
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+  return '$normalized-$suffix';
 }
 
 /// Room list for the joined site (Bible §20.5: "Join -> Rooms -> SOS flow
@@ -135,8 +152,7 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
                             const SizedBox(width: MeshSpace.md),
                             Expanded(
                               child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
                                     room.name,

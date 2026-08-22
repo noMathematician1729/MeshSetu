@@ -13,6 +13,7 @@ import '../../ui/theme/mesh_tokens.dart';
 import '../join/manifest.dart';
 import 'room_chat_screen.dart';
 import 'room_presence.dart';
+import 'room_presence_beacon.dart';
 import 'room_presence_socket.dart';
 
 /// Module-level so re-opening the same room lobby within one app session
@@ -22,10 +23,10 @@ import 'room_presence_socket.dart';
 /// announcement is wanted again.
 final Set<String> _announcedRoomMembers = {};
 
-/// Presence announcements use the same `RoomPresenceCodec` 24h TTL as the
-/// mesh outbox row; re-announcing well inside that window keeps a lobby's
-/// mesh-observed member list from expiring while the room stays open.
-const _reannounceInterval = Duration(minutes: 5);
+/// Presence re-announce cadence while a lobby is open. This is short on
+/// purpose: the point is not TTL refresh (presence rows live 24h) but being
+/// heard by a peer that connects after this device joined.
+const _reannounceInterval = Duration(seconds: 60);
 
 class RoomLobbyScreen extends ConsumerStatefulWidget {
   const RoomLobbyScreen({
@@ -47,7 +48,7 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
   List<RoomMember> _meshMembers = const [];
   List<RoomMember> _liveMembers = const [];
   var _receivedLiveSnapshot = false;
-  Timer? _reannounceTimer;
+  RoomPresenceBeacon? _presenceBeacon;
   var _startingEventMode = false;
 
   @override
@@ -60,11 +61,33 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
           if (mounted) setState(() => _meshMembers = members);
         });
     unawaited(_connectLivePresence());
-    unawaited(_announcePresence());
-    _reannounceTimer = Timer.periodic(
-      _reannounceInterval,
-      (_) => unawaited(_announcePresence(force: true)),
-    );
+    // Opening a room is the intent to participate in it. Without the radio up
+    // the presence announcement below never leaves the outbox, so nobody in
+    // the room can see anybody else offline.
+    unawaited(_ensureMeshForRoom());
+    _presenceBeacon = RoomPresenceBeacon(
+      announce: () => _announcePresence(force: true),
+      interval: _reannounceInterval,
+      peerCounts: _peerCountStream(),
+    )..start();
+  }
+
+  /// Peer counts drive an immediate re-announce the moment a phone links up,
+  /// which is when a presence packet can finally be delivered.
+  Stream<int> _peerCountStream() =>
+      ref
+          .read(meshBridgeClientProvider)
+          ?.meshStatusStream
+          .map((status) => status.peerCount) ??
+      const Stream<int>.empty();
+
+  /// Starts Event Mode for this room's site if it is not already running.
+  /// Idempotent: [RoomMeshBootstrap] reports `alreadyRunning` and simply
+  /// re-attaches the outbox bridge in that case.
+  Future<void> _ensureMeshForRoom() async {
+    final status = ref.read(meshBridgeClientProvider)?.meshStatus;
+    if (status?.eventModeRunning == true) return;
+    await _startEventModeFromRoom();
   }
 
   /// Announces this device's membership over the mesh so peers with no
@@ -139,7 +162,7 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
   void dispose() {
     unawaited(_meshMembersSubscription?.cancel());
     unawaited(_presenceSocket?.dispose());
-    _reannounceTimer?.cancel();
+    unawaited(_presenceBeacon?.dispose());
     super.dispose();
   }
 
@@ -220,6 +243,23 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
                 ? null
                 : '${members.length} member${members.length == 1 ? '' : 's'}',
           ),
+          // Connected to phones but still alone in the room almost always
+          // means the other device is in a different room: membership and
+          // messages are both filtered by exact room code. Say so, and show
+          // the code to compare, instead of leaving an empty list.
+          if (meshStatus.valueOrNull case final status?)
+            if (status.peerCount > 0 && members.length <= 1)
+              Padding(
+                padding: const EdgeInsets.only(bottom: MeshSpace.sm),
+                child: MeshStatusPill(
+                  label:
+                      '${status.peerCount} device'
+                      '${status.peerCount == 1 ? '' : 's'} linked · compare the '
+                      'room code below if nobody appears',
+                  icon: Icons.info_outline,
+                  tone: MeshStatusTone.neutral,
+                ),
+              ),
           members.isEmpty
               ? const MeshEmptyState(
                   icon: Icons.person_outline,
@@ -252,12 +292,14 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
                               ),
                             ),
                             MeshStatusPill(
-                              label: _liveMembers.any(
+                              label:
+                                  _liveMembers.any(
                                     (m) => m.memberId == member.memberId,
                                   )
                                   ? 'Active now'
                                   : 'Seen over mesh',
-                              tone: _liveMembers.any(
+                              tone:
+                                  _liveMembers.any(
                                     (m) => m.memberId == member.memberId,
                                   )
                                   ? MeshStatusTone.active

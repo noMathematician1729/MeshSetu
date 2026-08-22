@@ -15,6 +15,7 @@ import '../location/location_capture.dart';
 import 'room_message_dispatcher.dart';
 import 'room_lobby_screen.dart';
 import 'room_policy.dart';
+import 'room_presence_beacon.dart';
 import 'room_presence_socket.dart';
 import 'room_repository.dart';
 
@@ -37,6 +38,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     with WidgetsBindingObserver {
   final _textController = TextEditingController();
   RoomPresenceSocket? _liveTransport;
+  RoomPresenceBeacon? _presenceBeacon;
   String _liveStatus = 'Connecting…';
   String? _error;
   var _startingEventMode = false;
@@ -51,7 +53,37 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     // that arrive while the screen is mounted and foregrounded are suppressed.
     _activeRoomReporter.reportActive();
     unawaited(_connectLiveTransport());
-    unawaited(_announcePresence());
+    // Chat is unusable offline unless the radio is up: both outgoing messages
+    // and this device's presence sit in the outbox until Event Mode runs.
+    unawaited(_ensureMeshForRoom());
+    _presenceBeacon = RoomPresenceBeacon(
+      announce: _announcePresence,
+      peerCounts:
+          ref
+              .read(meshBridgeClientProvider)
+              ?.meshStatusStream
+              .map((status) => status.peerCount) ??
+          const Stream<int>.empty(),
+    )..start();
+    // Messages that died while the radio was down are recoverable; requeue
+    // them now that this room is open again.
+    unawaited(_retryFailedMessages());
+  }
+
+  Future<void> _ensureMeshForRoom() async {
+    final status = ref.read(meshBridgeClientProvider)?.meshStatus;
+    if (status?.eventModeRunning == true) return;
+    await _startEventModeFromRoom();
+  }
+
+  Future<void> _retryFailedMessages() async {
+    try {
+      await ref
+          .read(roomRepositoryProvider(widget.siteId))
+          .retryFailedMessages(widget.roomId);
+    } catch (_) {
+      // Requeueing is opportunistic; the manual retry action remains.
+    }
   }
 
   @override
@@ -140,6 +172,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     _activeRoomReporter.reportInactive();
     _textController.dispose();
     unawaited(_liveTransport?.dispose());
+    unawaited(_presenceBeacon?.dispose());
     super.dispose();
   }
 
@@ -356,6 +389,9 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                       sender: m.mine ? 'You' : (m.fromPeerId ?? 'Peer'),
                       reason: reason,
                       deliveryState: m.mine ? m.state : null,
+                      onRetry: m.mine && m.state == RoomMessageState.failed
+                          ? () => unawaited(_retryFailedMessages())
+                          : null,
                     );
                   },
                 );
@@ -457,6 +493,7 @@ class _MessageBubble extends StatelessWidget {
     required this.sender,
     required this.reason,
     required this.deliveryState,
+    this.onRetry,
   });
 
   final String text;
@@ -464,6 +501,10 @@ class _MessageBubble extends StatelessWidget {
   final String sender;
   final String? reason;
   final RoomMessageState? deliveryState;
+
+  /// Non-null for this device's messages that gave up. A failed row is not
+  /// re-drained by anything, so without this the text is simply lost.
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -519,6 +560,28 @@ class _MessageBubble extends StatelessWidget {
                 if (deliveryState != null) ...[
                   const SizedBox(width: MeshSpace.sm),
                   _DeliveryStateIcon(state: deliveryState!),
+                ],
+                if (onRetry case final retry?) ...[
+                  const SizedBox(width: MeshSpace.xs),
+                  Tooltip(
+                    message: 'Retry sending',
+                    child: InkWell(
+                      onTap: retry,
+                      borderRadius: BorderRadius.circular(MeshRadius.md),
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
+                        child: Semantics(
+                          button: true,
+                          label: 'Retry sending this message',
+                          child: Icon(
+                            Icons.refresh,
+                            size: 16,
+                            color: foreground.withValues(alpha: .9),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               ],
             ),
@@ -696,11 +759,7 @@ class _MeshStatusBar extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: Row(
                   children: [
-                    Icon(
-                      Icons.warning_amber,
-                      size: 14,
-                      color: palette.caution,
-                    ),
+                    Icon(Icons.warning_amber, size: 14, color: palette.caution),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
