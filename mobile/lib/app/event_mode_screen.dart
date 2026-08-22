@@ -8,13 +8,16 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart'
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../core/data/database.dart';
 import '../core/ble/device_sms_service.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/home/emergency_home_screen.dart';
+import '../feature/join/join_repository.dart';
 import '../feature/join/join_screen.dart';
 import '../feature/location/location_capture.dart';
+import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/onboarding/onboarding_screen.dart';
 import '../feature/profile/profile_screen.dart';
 import '../feature/rooms/room_chat_screen.dart';
@@ -83,8 +86,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   SosDeliveryTracker? _activeSosTracker;
   String? _preparingSosEventId;
   final List<SosDeliveryEvent> _pendingSosDeliveryEvents = [];
+  late final MeshDatabase _database;
+  late final JoinRepository _joinRepository;
+  late final OnboardingRepository _onboardingRepository;
+  late final StateController<MeshBridgeClient?> _meshBridgeClientController;
   late final TextEditingController _adminServerController;
   late final TextEditingController _gatewayKeyController;
+  late bool _gatewayEnabled;
+  late String _gatewayUrl;
+  late String _gatewayDemoKey;
   final VoiceRecorder _sttRecorder = VoiceRecorder.withCap(
     const Duration(seconds: 3),
   );
@@ -92,12 +102,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   @override
   void initState() {
     super.initState();
-    _adminServerController = TextEditingController(
-      text: ref.read(gatewayUrlProvider),
-    );
-    _gatewayKeyController = TextEditingController(
-      text: ref.read(gatewayDemoKeyProvider),
-    );
+    _database = ref.read(databaseProvider);
+    _joinRepository = ref.read(joinRepositoryProvider);
+    _onboardingRepository = ref.read(onboardingRepositoryProvider);
+    _meshBridgeClientController = ref.read(meshBridgeClientProvider.notifier);
+    _gatewayEnabled = ref.read(gatewayEnabledProvider);
+    _gatewayUrl = ref.read(gatewayUrlProvider);
+    _gatewayDemoKey = ref.read(gatewayDemoKeyProvider);
+    _adminServerController = TextEditingController(text: _gatewayUrl);
+    _gatewayKeyController = TextEditingController(text: _gatewayDemoKey);
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
     // Subscribe before declaring the native receiver ready: Android may flush
     // a cold-start gesture immediately, and broadcast streams drop events
@@ -112,8 +125,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     unawaited(_refreshGestureServiceState());
     // Retry any durable SOS rows as soon as the app opens, even if BLE/event
     // mode is unavailable on this phone.
-    _ensureAdminDeliveryBridge();
-    unawaited(_restoreOrStartEventMode());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _ensureAdminDeliveryBridge();
+      unawaited(_restoreOrStartEventMode());
+    });
   }
 
   Future<void> _restoreOrStartEventMode() async {
@@ -211,7 +227,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         unawaited(_bridgeClient?.dispose());
         _bridgeClient = null;
         _bridgeClientSiteStarted = false;
-        ref.read(meshBridgeClientProvider.notifier).state = null;
+        _meshBridgeClientController.state = null;
       case 'error':
         setState(() {
           _eventModeActive = false;
@@ -408,7 +424,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _forwardTestSosToAdmin(MeshEnvelope envelope) async {
-    if (!ref.read(gatewayEnabledProvider)) {
+    if (!_gatewayEnabled) {
       if (mounted) {
         setState(() => _status = 'MeshSetu\nTest SOS sent over BLE only');
       }
@@ -416,8 +432,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
     try {
       final bridge = GatewayBridge(
-        baseUrl: Uri.parse(ref.read(gatewayUrlProvider)),
-        demoKey: ref.read(gatewayDemoKeyProvider),
+        baseUrl: Uri.parse(_gatewayUrl),
+        demoKey: _gatewayDemoKey,
       );
       await bridge.postToDashboard(bridge.testSosJson(envelope));
       if (mounted) {
@@ -468,8 +484,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _forwardReceivedCealSos(Map data) async {
-    final url = ref.read(gatewayUrlProvider);
-    final key = ref.read(gatewayDemoKeyProvider);
+    final url = _gatewayUrl;
+    final key = _gatewayDemoKey;
     if (url.isEmpty || key.isEmpty) {
       await _showCompactSosFallback(
         data,
@@ -497,7 +513,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       // The detail request itself is the reachability check. A separate health
       // probe incorrectly marked phones with working cellular data as offline
       // when that probe timed out or the control room was waking up.
-      final site = await ref.read(joinRepositoryProvider).activeManifest();
+      final site = await _joinRepository.activeManifest();
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
         siteId: site?.siteId ?? MeshEventController.demoSiteId,
@@ -545,7 +561,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   /// required — using Android's [SmsManager] via [DeviceSmsService].
   Future<void> _sendDeviceSmsForCompactSos(Map data) async {
     try {
-      final profile = await ref.read(onboardingRepositoryProvider).load();
+      final profile = await _onboardingRepository.load();
       if (profile == null || profile.emergencyContacts.isEmpty) return;
 
       // Build a compact body with whatever location the compact alert carries.
@@ -1091,11 +1107,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   /// mesh identity being ready.
   void _ensureAdminDeliveryBridge() {
     _bridgeClient ??=
-        ref.read(meshBridgeClientProvider) ??
-        MeshBridgeClient(ref.read(databaseProvider));
+        _meshBridgeClientController.state ?? MeshBridgeClient(_database);
     _bridgeClient!.onOriginForward = _onOriginForward;
     _bridgeClient!.onSosDelivery = _onSosDeliveryEvent;
-    ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
+    _meshBridgeClientController.state = _bridgeClient;
     _applyGatewaySettings();
   }
 
@@ -1109,7 +1124,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _startBridgeForActiveSite({String? requestedSiteId}) async {
-    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    final site = await _joinRepository.activeManifest();
     final siteId =
         requestedSiteId ?? site?.siteId ?? MeshEventController.demoSiteId;
     if (!mounted) return;
@@ -1177,7 +1192,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _saveActiveMeshConfiguration() async {
-    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    final site = await _joinRepository.activeManifest();
     final configuration = MeshSiteConfiguration.forSite(
       site?.siteId ?? MeshEventController.demoSiteId,
     );
@@ -1201,11 +1216,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   void _applyGatewaySettings() {
-    final enabled = ref.read(gatewayEnabledProvider);
-    final url = ref.read(gatewayUrlProvider);
-    final key = ref.read(gatewayDemoKeyProvider);
-    final bridge = (enabled && url.isNotEmpty && key.isNotEmpty)
-        ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
+    final bridge =
+        (_gatewayEnabled &&
+            _gatewayUrl.isNotEmpty &&
+            _gatewayDemoKey.isNotEmpty)
+        ? GatewayBridge(
+            baseUrl: Uri.parse(_gatewayUrl),
+            demoKey: _gatewayDemoKey,
+          )
         : null;
     _bridgeClient?.gatewayBridge = bridge;
     unawaited(_applyContactAlertSettings(bridge));
@@ -1216,7 +1234,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   /// relayed by someone else entirely.
   Future<void> _applyContactAlertSettings(GatewayBridge? bridge) async {
     try {
-      final profile = await ref.read(onboardingRepositoryProvider).load();
+      final profile = await _onboardingRepository.load();
       _bridgeClient?.configureContactAlerts(
         reporterUid: profile?.reporterUid,
         bridge: bridge,
@@ -1279,9 +1297,18 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(gatewayEnabledProvider, (_, _) => _applyGatewaySettings());
-    ref.listen(gatewayUrlProvider, (_, _) => _applyGatewaySettings());
-    ref.listen(gatewayDemoKeyProvider, (_, _) => _applyGatewaySettings());
+    ref.listen(gatewayEnabledProvider, (_, next) {
+      _gatewayEnabled = next;
+      _applyGatewaySettings();
+    });
+    ref.listen(gatewayUrlProvider, (_, next) {
+      _gatewayUrl = next;
+      _applyGatewaySettings();
+    });
+    ref.listen(gatewayDemoKeyProvider, (_, next) {
+      _gatewayDemoKey = next;
+      _applyGatewaySettings();
+    });
     return EmergencyHomeScreen(
       eventModeActive: _eventModeActive,
       sending: _sosPacketSending || _sttTesting,
