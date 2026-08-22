@@ -1,4 +1,5 @@
 import Arrow from './Arrow';
+import Highlighter from './Highlighter';
 import SectionLabel from './SectionLabel';
 
 export default function Hero() {
@@ -8,7 +9,7 @@ export default function Hero() {
       <div className="container hero-inner">
         <div className="hero-copy">
           <SectionLabel className="hero-eyebrow">MeshSetu / Offline emergency plan</SectionLabel>
-          <h1>Help still moves<br />when networks fail.</h1>
+          <h1>Help still <Highlighter action="underline" color="#fe1e34">moves</Highlighter><br />when <Highlighter action="highlight" color="#fe1e34">networks fail.</Highlighter></h1>
           <p className="hero-description">MeshSetu uses nearby Android phones to carry a structured SOS, short voice evidence, and scoped updates across a store-and-forward Bluetooth Low Energy overlay when internet and cellular service are unavailable.</p>
           <div className="hero-actions">
             <a className="button button--signal" href="#demo">Trace the relay <Arrow /></a>

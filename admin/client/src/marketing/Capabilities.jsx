@@ -15,16 +15,13 @@ function GestureVisual() {
     <g className="gesture-phone"><rect x="190" y="30" width="145" height="260" rx="27" /><rect x="202" y="56" width="121" height="206" rx="14" /><rect className="gesture-sos-screen" x="206" y="60" width="113" height="198" rx="11" /><path d="M247 44h32" /><rect x="219" y="86" width="87" height="25" rx="6" /><circle className="gesture-sos-mark" cx="262" cy="172" r="38" /><path className="gesture-sos-check" d="m242 172 13 13 29-31" /></g>
     <g className="gesture-button"><rect x="181" y="105" width="10" height="36" rx="5" /><path d="M168 112v22" /></g>
     <circle className="gesture-press gesture-press--one" cx="181" cy="123" r="15" /><circle className="gesture-press gesture-press--two" cx="181" cy="123" r="15" /><circle className="gesture-press gesture-press--three" cx="181" cy="123" r="15" />
-    <g className="gesture-counter"><rect x="356" y="113" width="102" height="84" rx="12" /><circle cx="385" cy="155" r="6" /><circle cx="407" cy="155" r="6" /><circle cx="429" cy="155" r="6" /></g>
-    <path className="gesture-signal" d="M335 171h22l10-14 12 28 13-20h22" />
   </svg>;
 }
 
 function OfflineVisual() {
   return <svg className="offline-visual" viewBox="0 0 440 150" fill="none" aria-hidden="true">
-    <path className="offline-route" d="M66 104h100l52-57 77 57h84" /><path className="offline-route offline-route--thin" d="M66 117h98l54-48 77 48h84" />
-    <rect className="offline-device" x="36" y="78" width="42" height="55" rx="7" /><path className="offline-device" d="M48 89h18M54 121h6" /><circle className="offline-node" cx="218" cy="47" r="18" /><circle className="offline-node" cx="295" cy="104" r="18" /><rect className="offline-gateway" x="379" y="75" width="28" height="58" rx="3" /><path className="offline-gateway" d="M386 87h14M386 96h14" />
-    <circle className="offline-packet" cx="78" cy="104" r="6"><animateMotion dur="9s" repeatCount="indefinite" path="M0 0H88l52-57 77 57h98" /></circle><path className="offline-no-wifi" d="M59 48c12-12 30-12 42 0M66 55c8-8 20-8 28 0M77 62c2-2 5-2 7 0M52 40l53 29" />
+    <rect className="offline-device" x="36" y="78" width="42" height="55" rx="7" /><path className="offline-device" d="M48 89h18M54 121h6" /><rect className="offline-device" x="362" y="78" width="42" height="55" rx="7" /><path className="offline-device" d="M374 89h18M380 121h6" />
+    <circle className="offline-packet" cx="78" cy="104" r="6"><animateMotion dur="5.8s" repeatCount="indefinite" calcMode="spline" keySplines=".37 0 .63 1" path="M0 0Q152-176 305 0" /></circle><path className="offline-no-wifi" d="M59 48c12-12 30-12 42 0M66 55c8-8 20-8 28 0M77 62c2-2 5-2 7 0M52 40l53 29" />
   </svg>;
 }
 
@@ -37,10 +34,11 @@ function VoiceVisual() {
 }
 
 export default function Capabilities() {
-  return <section className="capabilities section-paper" id="capabilities"><div className="container"><div className="capability-bento">
+  return <section className="capabilities section-paper" id="capabilities"><div className="container"><div className="section-heading capabilities-intro"><h2>Features</h2><p>All-in-one SOS, <Highlighter action="highlight" color="#fe1e34">completely</Highlighter> ready when it matters.</p></div><div className="capability-bento">
     <article className="capability-panel capability-panel--large capability-panel--rooms"><h3 className="capability-panel__title">Personalised rooms</h3><RoomsVisual /></article>
     <article className="capability-panel capability-panel--small capability-panel--offline" id="demo"><h3 className="capability-panel__title">No Wi-Fi — no problem</h3><OfflineVisual /></article>
     <article className="capability-panel capability-panel--small capability-panel--voice"><h3 className="capability-panel__title">Voice SOS</h3><VoiceVisual /></article>
     <article className="capability-panel capability-panel--large capability-panel--gesture"><h3 className="capability-panel__title">Gesture control</h3><GestureVisual /></article>
   </div></div></section>;
 }
+import Highlighter from './Highlighter';
