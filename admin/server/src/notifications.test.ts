@@ -69,7 +69,7 @@ describe('SOS recipient notifications', () => {
     expect(detail.incident_type).toBe('general')
     expect(detail.hazards).toEqual(['general'])
     const smsDeliveries = await store.smsDeliveriesForEvent(eventId)
-    expect(smsDeliveries).toMatchObject([{ recipient_phone: '+15550002', state: 'sent', provider_message_sid: 'SM-test-1' }])
+    expect(smsDeliveries).toMatchObject([{ recipient_phone: '+15550002', state: 'sent', provider_message_sid: 'twilio:SM-test-1' }])
     expect(twilioRequests).toHaveLength(1)
     expect(new URLSearchParams(twilioRequests[0].body).get('Body')).toContain('Reporter: SOS Sender')
     // Several connected relays may forward this exact alert. It stays one SMS.
