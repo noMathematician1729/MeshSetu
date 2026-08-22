@@ -2,6 +2,16 @@
 
 Android-first, offline emergency communication over a BLE store-and-forward overlay.
 
+## Repository layout
+
+```text
+mobile/        Flutter Android app (mesh transport, SOS, rooms, STT, gestures)
+admin/server/  Node + TypeScript control-room API (Postgres, SMS fan-out)
+admin/client/  React operator dashboard
+context.md     Frozen product/architecture specification
+REMAINING_WORK.md  Implemented vs. outstanding scope against context.md
+```
+
 ## Build and test
 
 The Flutter build targets Android SDK 36. Use a Flutter SDK compatible with the Dart constraint in `mobile/pubspec.yaml`.
@@ -12,6 +22,13 @@ flutter pub get
 flutter analyze
 flutter test
 flutter build apk --debug
+```
+
+Control room:
+
+```bash
+cd admin/server && npm ci && npm test && npm run build
+cd admin/client && npm ci && npm run build
 ```
 
 Install `mobile/build/app/outputs/flutter-apk/app-debug.apk` on physical BLE-capable Android phones. Tap **Start event mode** to request permissions and start the visible connected-device foreground service. The foreground task owns scanning and relay processing, so leaving the screen does not stop the mesh; use **Stop event mode** to shut it down.
