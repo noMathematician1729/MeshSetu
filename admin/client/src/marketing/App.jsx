@@ -8,7 +8,7 @@ import Hero from './Hero';
 import HowItWorks from './HowItWorks';
 import Interfaces from './Interfaces';
 import MeshSimulation from './MeshSimulation';
-import Safety from './Safety';
+import Protocol from './Protocol';
 import TechStack from './TechStack';
 
 gsap.registerPlugin(ScrollToPlugin);
@@ -28,12 +28,12 @@ export default function App() {
     }
 
     gsap.to(window, {
-      duration: 1.35,
-      ease: 'power3.inOut',
+      duration: 3.2,
+      ease: 'power2.inOut',
       overwrite: 'auto',
       scrollTo: { y: section, offsetY: 96, autoKill: true },
     });
   };
 
-  return <div onClick={scrollToSection}><Header /><main><Hero /><HowItWorks /><MeshSimulation /><Capabilities /><Safety /><TechStack /><Architecture /><Interfaces /></main><Footer /></div>;
+  return <div onClick={scrollToSection}><Header /><main><Hero /><HowItWorks /><MeshSimulation /><Capabilities /><Protocol /><TechStack /><Architecture /><Interfaces /></main><Footer /></div>;
 }

@@ -21,7 +21,7 @@ function GestureVisual() {
 function OfflineVisual() {
   return <svg className="offline-visual" viewBox="0 0 440 150" fill="none" aria-hidden="true">
     <rect className="offline-device" x="36" y="78" width="42" height="55" rx="7" /><path className="offline-device" d="M48 89h18M54 121h6" /><rect className="offline-device" x="362" y="78" width="42" height="55" rx="7" /><path className="offline-device" d="M374 89h18M380 121h6" />
-    <circle className="offline-packet" cx="78" cy="104" r="6"><animateMotion dur="5.8s" repeatCount="indefinite" calcMode="spline" keySplines=".37 0 .63 1" path="M0 0Q152-176 305 0" /></circle><path className="offline-no-wifi" d="M59 48c12-12 30-12 42 0M66 55c8-8 20-8 28 0M77 62c2-2 5-2 7 0M52 40l53 29" />
+    <circle className="offline-packet" cx="78" cy="104" r="6"><animateMotion dur="8.2s" repeatCount="indefinite" calcMode="spline" keySplines=".37 0 .63 1" path="M0 0Q152-176 305 0" /></circle><path className="offline-no-wifi" d="M59 48c12-12 30-12 42 0M66 55c8-8 20-8 28 0M77 62c2-2 5-2 7 0M52 40l53 29" />
   </svg>;
 }
 
@@ -34,11 +34,10 @@ function VoiceVisual() {
 }
 
 export default function Capabilities() {
-  return <section className="capabilities section-paper" id="capabilities"><div className="container"><div className="section-heading capabilities-intro"><h2>Features</h2><p>All-in-one SOS, <Highlighter action="highlight" color="#fe1e34">completely</Highlighter> ready when it matters.</p></div><div className="capability-bento">
+  return <section className="capabilities section-paper" id="capabilities"><div className="container"><div className="section-heading capabilities-intro"><h2>Features</h2><p>All-in-one SOS, completely ready when it matters.</p></div><div className="capability-bento">
     <article className="capability-panel capability-panel--large capability-panel--rooms"><h3 className="capability-panel__title">Personalised rooms</h3><RoomsVisual /></article>
     <article className="capability-panel capability-panel--small capability-panel--offline" id="demo"><h3 className="capability-panel__title">No Wi-Fi — no problem</h3><OfflineVisual /></article>
     <article className="capability-panel capability-panel--small capability-panel--voice"><h3 className="capability-panel__title">Voice SOS</h3><VoiceVisual /></article>
     <article className="capability-panel capability-panel--large capability-panel--gesture"><h3 className="capability-panel__title">Gesture control</h3><GestureVisual /></article>
   </div></div></section>;
 }
-import Highlighter from './Highlighter';

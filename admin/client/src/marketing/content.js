@@ -15,15 +15,6 @@ export const steps = [
   { title: 'Control room reached', text: 'When the signal reaches a connected gateway, the local control room receives the verified SOS with the details responders need to act.' },
 ];
 
-export const safetyRules = [
-  'A manual SOS is never blocked by speech or triage failure.',
-  'SOS metadata always outranks chat and voice chunks.',
-  'Uncertainty in transcription, triage, and location remains visible.',
-  'Incomplete voice never prevents the structured SOS from being actionable.',
-  'AI recommends; human authorities make the final decision.',
-  'Messages expire, deduplicate, and stop relaying at their hop limit.',
-];
-
 export const demoStages = [
   { label: 'ORIGIN DEVICE', title: 'SOS saved locally', detail: 'The structured report is committed to the phone before it tries to travel.', color: 'red' },
   { label: 'NEARBY PHONE', title: 'BLE relay picks it up', detail: 'A participating device stores the encrypted object and carries it to the next hop.', color: 'yellow' },

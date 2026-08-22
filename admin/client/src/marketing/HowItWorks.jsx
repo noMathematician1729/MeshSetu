@@ -24,8 +24,9 @@ export default function HowItWorks() {
             start: 'top top',
             end: () => `+=${distance()}`,
             pin: viewportRef.current,
-            scrub: 1.4,
+            scrub: 2.4,
             invalidateOnRefresh: true,
+            onUpdate: (self) => journeyRef.current.style.setProperty('--journey-gradient-stop', `${82 - self.progress * 44}%`),
           },
         });
         return () => journey.kill();

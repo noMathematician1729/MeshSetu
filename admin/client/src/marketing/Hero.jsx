@@ -10,9 +10,9 @@ export default function Hero() {
         <div className="hero-copy">
           <SectionLabel className="hero-eyebrow">MeshSetu / Offline emergency plan</SectionLabel>
           <h1>Help still <Highlighter action="underline" color="#fe1e34">moves</Highlighter><br />when <Highlighter action="highlight" color="#fe1e34">networks fail.</Highlighter></h1>
-          <p className="hero-description">MeshSetu uses nearby Android phones to carry a structured SOS, short voice evidence, and scoped updates across a store-and-forward Bluetooth Low Energy overlay when internet and cellular service are unavailable.</p>
+          <p className="hero-description">MeshSetu uses nearby Android phones to carry a structured SOS, short voice evidence, and scoped updates across a <Highlighter action="underline" color="#fe1e34">store-and-forward</Highlighter> Bluetooth Low Energy overlay when internet and cellular service are unavailable.</p>
           <div className="hero-actions">
-            <a className="button button--signal" href="#demo">Trace the relay <Arrow /></a>
+            <a className="button button--signal" href="#simulation">Trace the relay <Arrow /></a>
             <a className="text-link" href="#how-it-works">How it works <Arrow /></a>
           </div>
         </div>

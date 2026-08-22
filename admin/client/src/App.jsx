@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { gsap } from 'gsap'
+import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import Lenis from 'lenis'
 import { authToken, getEvents, getNearbyAuthorities, getPublicEvent, getVoice, login, openStream, setStatus, setToken } from './api'
 import MarketingApp from './marketing/App.jsx'
 import marketingStyles from './marketing/styles.css?inline'
+import reactFlowStyles from 'reactflow/dist/style.css?inline'
 
 const priorityRank = { p0Critical: 0, p1High: 1, p2Normal: 2, p3Bulk: 3 }
 const sortEvents = events => [...events].sort((a, b) => (priorityRank[a.priority] ?? 9) - (priorityRank[b.priority] ?? 9) || Number(b.triage?.score ?? 0) - Number(a.triage?.score ?? 0) || Number(b.received_at_ms ?? 0) - Number(a.received_at_ms ?? 0))
@@ -35,6 +39,10 @@ const isolatedMarketingStyles = marketingStyles
   .replace(/:root/g, ':host')
   .replace(/\bhtml\b/g, '.marketing-root')
   .replace(/\bbody\b/g, '.marketing-root')
+const isolatedReactFlowStyles = reactFlowStyles
+  .replace(/:root/g, ':host')
+  .replace(/\bhtml\b/g, '.marketing-root')
+  .replace(/\bbody\b/g, '.marketing-root')
 
 function Login({ onLogin }) { const [email, setEmail] = useState('operator@meshsetu.local'); const [password, setPassword] = useState('meshsetu-demo'); const [error, setError] = useState(''); const submit = async e => { e.preventDefault(); try { await login(email, password); onLogin() } catch (err) { setError(err.message) } }; return <main className="login-shell"><div className="login-card"><div className="brand"><i /> MESHSETU</div><span className="eyebrow">AUTHORITY ACCESS / LOCAL CONTROL ROOM</span><h1>Operator<br /><em>sign in.</em></h1><form onSubmit={submit}><label>Operator email<input value={email} onChange={e => setEmail(e.target.value)} type="email" /></label><label>Access password<input value={password} onChange={e => setPassword(e.target.value)} type="password" /></label>{error && <p className="error">{error}</p>}<button className="primary">Enter control room ↗</button></form><small>Local server · no internet required</small></div></main> }
 
@@ -48,12 +56,32 @@ function MarketingPage() {
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
     shadow.innerHTML = ''
     const style = document.createElement('style')
-    style.textContent = isolatedMarketingStyles
+    style.textContent = `${isolatedMarketingStyles}\n${isolatedReactFlowStyles}`
     const mount = document.createElement('div')
     shadow.append(style, mount)
     const root = createRoot(mount)
     root.render(<div className="marketing-root"><MarketingApp /></div>)
     return () => root.unmount()
+  }, [])
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
+
+    const lenis = new Lenis({
+      duration: 1.8,
+      smoothWheel: true,
+      wheelMultiplier: 0.72,
+      touchMultiplier: 1.15,
+    })
+    const update = time => lenis.raf(time * 1000)
+
+    lenis.on('scroll', ScrollTrigger.update)
+    gsap.ticker.add(update)
+    gsap.ticker.lagSmoothing(0)
+
+    return () => {
+      gsap.ticker.remove(update)
+      lenis.destroy()
+    }
   }, [])
   return <div className="marketing-shell"><div ref={hostRef} /></div>
 }
