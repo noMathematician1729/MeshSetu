@@ -147,7 +147,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Acknowledged by the mesh'), findsOneWidget);
+      expect(find.text('Admin delivery pending'), findsOneWidget);
       // The radar sweep runs a repeating AnimationController, and Drift
       // schedules a zero-duration internal timer when the delivery
       // StreamBuilder's query stream is cancelled — settle both before the
@@ -157,6 +157,11 @@ void main() {
     });
 
     testWidgets('return to home pops the screen', (tester) async {
+      tester.view
+        ..physicalSize = const Size(800, 1400)
+        ..devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       final db = MeshDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       await tester.pumpWidget(
@@ -183,6 +188,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Emergency Active'), findsWidgets);
 
+      await tester.dragUntilVisible(
+        find.text('Return to home'),
+        find.byType(ListView),
+        const Offset(0, -300),
+      );
       await tester.tap(find.text('Return to home'));
       await tester.pumpAndSettle();
       expect(find.text('Emergency Active'), findsNothing);
