@@ -60,7 +60,10 @@
                 android:resource="@xml/emergency_gesture_accessibility_service" />
         </service>
 
-        <!-- flutter_foreground_task's service; do not change the name. -->
+        <!-- flutter_foreground_task's service; do not change the name.
+             connectedDevice only: on Android 15+ the dataSync type carries a
+             6-hour daily timeout that connectedDevice does not, so adding it
+             would shorten the maximum relay session. -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="connectedDevice"
