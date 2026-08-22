@@ -1,0 +1,226 @@
+import 'package:flutter/material.dart';
+
+import '../../core/ble/sos_advertisement.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
+
+/// Home tab hero. Signal-lattice hero surface with the SOS button as the
+/// unambiguous focal point, a status rail for mesh/peer state, a compact
+/// secondary-controls row, and a slim Rooms teaser (Rooms itself is a full
+/// tab as of Task 3 — this card just shortcuts create/join without
+/// duplicating the whole Rooms screen here).
+///
+/// Constructor signature is unchanged from the pre-revamp screen:
+/// [EventModeScreen] constructs this positionally with named args, and
+/// `test/feature/emergency_home_ui_test.dart` + `test/widget_test.dart`
+/// assert against it.
+class EmergencyHomeScreen extends StatelessWidget {
+  const EmergencyHomeScreen({
+    super.key,
+    required this.eventModeActive,
+    required this.sending,
+    required this.emergencyType,
+    required this.description,
+    required this.holdSeconds,
+    required this.onSos,
+    required this.onProfile,
+    required this.onEmergencyType,
+    required this.onVoice,
+    required this.onDescribe,
+    required this.onCreateRoom,
+    required this.onJoinRoom,
+  });
+
+  final bool eventModeActive;
+  final bool sending;
+  final SosEmergencyType emergencyType;
+  final String description;
+  final int holdSeconds;
+  final VoidCallback onSos;
+  final VoidCallback onProfile;
+  final VoidCallback onEmergencyType;
+  final VoidCallback onVoice;
+  final VoidCallback onDescribe;
+  final VoidCallback onCreateRoom;
+  final VoidCallback onJoinRoom;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return Scaffold(
+      body: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                MeshHeroSurface(
+                  live: sending,
+                  padding: const EdgeInsets.fromLTRB(
+                    MeshSpace.screen,
+                    MeshSpace.sm,
+                    MeshSpace.screen,
+                    MeshSpace.lg,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          const MeshMicroLabel('MeshSetu'),
+                          const Spacer(),
+                          IconButton(
+                            tooltip: 'Open profile',
+                            onPressed: onProfile,
+                            icon: const Icon(Icons.account_circle_outlined),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: MeshSpace.sm),
+                      Text(
+                        'Emergency Aid',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.displaySmall,
+                      ),
+                      const SizedBox(height: MeshSpace.xs),
+                      Text(
+                        'One tap away from help',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: MeshSpace.lg),
+                      MeshStatRail(
+                        items: [
+                          MeshStatRailItem(
+                            label: 'Mesh',
+                            value: eventModeActive ? 'Active' : 'Offline',
+                            icon: eventModeActive
+                                ? Icons.bluetooth_connected
+                                : Icons.offline_bolt_outlined,
+                            tone: eventModeActive
+                                ? MeshStatusTone.active
+                                : MeshStatusTone.neutral,
+                          ),
+                          MeshStatRailItem(
+                            label: 'Hold time',
+                            value: '${holdSeconds}s',
+                            icon: Icons.timer_outlined,
+                          ),
+                          MeshStatRailItem(
+                            label: 'Type',
+                            value: emergencyType.label,
+                            icon: _iconFor(emergencyType),
+                            tone: emergencyType != SosEmergencyType.general
+                                ? MeshStatusTone.critical
+                                : MeshStatusTone.neutral,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: MeshSpace.xl),
+                      Center(
+                        child: MeshSosButton(
+                          enabled: !sending,
+                          holdDuration: Duration(seconds: holdSeconds),
+                          onActivated: onSos,
+                        ),
+                      ),
+                      const SizedBox(height: MeshSpace.md),
+                      Text(
+                        sending
+                            ? 'Preparing your encrypted emergency packet…'
+                            : 'Press and hold for $holdSeconds seconds to activate emergency protocol',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    MeshSpace.screen,
+                    MeshSpace.lg,
+                    MeshSpace.screen,
+                    MeshSpace.xl,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      MeshActionTile(
+                        compact: true,
+                        icon: _iconFor(emergencyType),
+                        title: 'Emergency type',
+                        subtitle: emergencyType.label,
+                        selected: emergencyType != SosEmergencyType.general,
+                        onTap: onEmergencyType,
+                      ),
+                      const SizedBox(height: MeshSpace.sm),
+                      MeshActionTile(
+                        compact: true,
+                        icon: Icons.mic_none_rounded,
+                        title: 'Voice input',
+                        subtitle: description.isEmpty
+                            ? 'Speak details'
+                            : 'Details ready',
+                        selected: description.isNotEmpty,
+                        onTap: onVoice,
+                      ),
+                      const SizedBox(height: MeshSpace.sm),
+                      MeshActionTile(
+                        compact: true,
+                        icon: Icons.edit_note_rounded,
+                        title: 'Describe SOS',
+                        subtitle: description.isEmpty
+                            ? 'Add context'
+                            : description,
+                        selected: description.isNotEmpty,
+                        onTap: onDescribe,
+                      ),
+                      const SizedBox(height: MeshSpace.xl),
+                      const MeshSectionTitle(
+                        'Rooms',
+                        subtitle: 'Coordinate securely with people nearby',
+                      ),
+                      MeshCard(
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: onCreateRoom,
+                                icon: const Icon(Icons.add_circle_outline),
+                                label: const Text('Create'),
+                              ),
+                            ),
+                            const SizedBox(width: MeshSpace.sm),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: onJoinRoom,
+                                icon: const Icon(Icons.qr_code_scanner),
+                                label: const Text('Join'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      backgroundColor: palette.canvas,
+    );
+  }
+
+  static IconData _iconFor(SosEmergencyType type) => switch (type) {
+    SosEmergencyType.general => Icons.sos_outlined,
+    SosEmergencyType.fire => Icons.local_fire_department_outlined,
+    SosEmergencyType.crime => Icons.gavel_outlined,
+    SosEmergencyType.kidnap => Icons.person_search_outlined,
+    SosEmergencyType.medical => Icons.medical_services_outlined,
+    SosEmergencyType.naturalDisaster => Icons.tsunami_outlined,
+  };
+}

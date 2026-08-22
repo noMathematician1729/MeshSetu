@@ -160,9 +160,6 @@ abstract final class RoomMessageNotifications {
   }
 
   /// Encodes the tap-routing payload for a room notification.
-  static String roomPayload({
-    required String siteId,
-    required String roomId,
-  }) =>
+  static String roomPayload({required String siteId, required String roomId}) =>
       jsonEncode({'type': 'room', 'siteId': siteId, 'roomId': roomId});
 }

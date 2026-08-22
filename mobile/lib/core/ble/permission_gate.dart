@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import 'ble_permissions.dart';
 
 /// Blocks the app until the runtime permissions required by the BLE mesh have
@@ -129,6 +131,7 @@ class _PermissionGateState extends State<PermissionGate>
   @override
   Widget build(BuildContext context) {
     if (_allGranted) return widget.child;
+    final palette = MeshPalette.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Permissions required')),
       body: SafeArea(
@@ -145,7 +148,11 @@ class _PermissionGateState extends State<PermissionGate>
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const Icon(Icons.security, size: 64),
+                        Icon(
+                          Icons.health_and_safety_outlined,
+                          size: 64,
+                          color: palette.primary,
+                        ),
                         const SizedBox(height: 20),
                         Text(
                           'MeshSetu needs permission before you can enter the app.',
@@ -163,28 +170,31 @@ class _PermissionGateState extends State<PermissionGate>
                         if (_loading)
                           const Center(child: CircularProgressIndicator())
                         else ...[
-                          for (final permission in _required)
-                            ListTile(
-                              leading: Icon(
-                                _statuses[permission]?.isGranted == true
-                                    ? Icons.check_circle
-                                    : Icons.cancel_outlined,
-                                color: _statuses[permission]?.isGranted == true
-                                    ? Colors.green
-                                    : Colors.red,
-                              ),
-                              title: Text(_label(permission)),
-                              dense: true,
+                          MeshCard(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                for (final permission in _required) ...[
+                                  _PermissionRow(
+                                    label: _label(permission),
+                                    granted:
+                                        _statuses[permission]?.isGranted ==
+                                        true,
+                                  ),
+                                  if (permission != _required.last)
+                                    const Divider(height: MeshSpace.sm),
+                                ],
+                                if (!_bluetoothEnabled) ...[
+                                  const Divider(height: MeshSpace.sm),
+                                  _PermissionRow(
+                                    label: 'Turn Bluetooth on to continue',
+                                    granted: false,
+                                    icon: Icons.bluetooth_disabled,
+                                  ),
+                                ],
+                              ],
                             ),
-                          if (!_bluetoothEnabled)
-                            const ListTile(
-                              leading: Icon(
-                                Icons.bluetooth_disabled,
-                                color: Colors.red,
-                              ),
-                              title: Text('Turn Bluetooth on to continue'),
-                              dense: true,
-                            ),
+                          ),
                           const SizedBox(height: 12),
                           FilledButton.icon(
                             onPressed: _requesting ? null : _requestPermissions,
@@ -217,6 +227,43 @@ class _PermissionGateState extends State<PermissionGate>
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+/// Plain Row layout instead of ListTile — a ListTile placed directly inside
+/// MeshCard's DecoratedBox with no intervening Material ancestor triggers
+/// Flutter's "background color or ink splashes may be invisible" assertion
+/// under a full theme (same class of bug fixed in Task 8 for
+/// settings_screen.dart/gateway_screen.dart).
+class _PermissionRow extends StatelessWidget {
+  const _PermissionRow({
+    required this.label,
+    required this.granted,
+    this.icon,
+  });
+
+  final String label;
+  final bool granted;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: MeshSpace.xs),
+      child: Row(
+        children: [
+          Icon(
+            icon ?? (granted ? Icons.check_circle : Icons.cancel_outlined),
+            color: granted ? palette.live : palette.ember,
+          ),
+          const SizedBox(width: MeshSpace.md),
+          Expanded(
+            child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+          ),
+        ],
       ),
     );
   }

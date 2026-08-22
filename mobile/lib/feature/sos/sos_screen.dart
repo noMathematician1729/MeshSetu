@@ -7,6 +7,8 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../app/providers.dart';
 import '../../core/data/database.dart';
 import '../../core/model/model.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import '../location/location_capture.dart';
 import '../triage/triage_engine.dart';
 import '../voice/voice_recorder.dart';
@@ -120,57 +122,58 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   @override
   Widget build(BuildContext context) {
     final db = ref.watch(databaseProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Send SOS')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Tap once, speak naturally, and the app will attach offline '
-              'transcription and best-effort GPS before relaying the SOS.',
+    final palette = MeshPalette.of(context);
+    return MeshPage(
+      title: 'Send SOS',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const MeshStatusPill(
+            label: 'Encrypted emergency packet',
+            icon: Icons.lock_outline,
+            tone: MeshStatusTone.critical,
+          ),
+          const SizedBox(height: MeshSpace.md),
+          const Text(
+            'Tap once, speak naturally, and the app will attach offline '
+            'transcription and best-effort GPS before relaying the SOS.',
+          ),
+          const SizedBox(height: MeshSpace.md),
+          TextField(
+            controller: _textController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Optional text fallback',
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _textController,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                labelText: 'Optional text fallback',
-                border: OutlineInputBorder(),
-              ),
+          ),
+          const SizedBox(height: MeshSpace.md),
+          MeshFullWidthButton(
+            icon: Icons.sos,
+            busy: _sending,
+            onPressed: _sendSos,
+            label: _sending ? 'Recording / sending…' : 'Send emergency SOS',
+          ),
+          if (_status != null) ...[
+            const SizedBox(height: MeshSpace.md),
+            MeshCard(
+              tint: palette.ember.withValues(alpha: 0.08),
+              child: Text(_status!),
             ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                icon: const Icon(Icons.sos),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-                onPressed: _sending ? null : _sendSos,
-                label: Text(_sending ? 'Recording / sending…' : 'SEND SOS'),
-              ),
-            ),
-            if (_status != null) ...[
-              const SizedBox(height: 16),
-              Text(_status!),
-            ],
-            if (_eventId case final eventId?) ...[
-              const SizedBox(height: 8),
-              StreamBuilder<OutboxEvent?>(
-                stream: (db.select(
-                  db.outboxEvents,
-                )..where((t) => t.eventId.equals(eventId))).watchSingleOrNull(),
-                builder: (context, snapshot) => Text(
-                  _deliveryLabel(snapshot.data?.state),
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ),
-            ],
           ],
-        ),
+          if (_eventId case final eventId?) ...[
+            const SizedBox(height: 8),
+            StreamBuilder<OutboxEvent?>(
+              stream: (db.select(
+                db.outboxEvents,
+              )..where((t) => t.eventId.equals(eventId))).watchSingleOrNull(),
+              builder: (context, snapshot) => Text(
+                _deliveryLabel(snapshot.data?.state),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

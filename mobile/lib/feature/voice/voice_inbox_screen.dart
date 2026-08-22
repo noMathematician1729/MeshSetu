@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
-import 'package:drift/drift.dart';
+import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
@@ -9,6 +9,8 @@ import 'package:path_provider/path_provider.dart';
 import '../../app/providers.dart';
 import '../../core/data/database.dart';
 import '../../core/model/model.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import 'voice_repository.dart';
 
 /// Received voice evidence for a site. `InboxEvents` rows only exist once
@@ -24,9 +26,10 @@ class VoiceInboxScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final db = ref.watch(databaseProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Voice evidence')),
-      body: StreamBuilder(
+    return MeshPage(
+      title: 'Voice Evidence',
+      scrollable: false,
+      child: StreamBuilder(
         stream:
             (db.select(db.inboxEvents)..where(
                   (t) =>
@@ -37,10 +40,20 @@ class VoiceInboxScreen extends ConsumerWidget {
         builder: (context, snapshot) {
           final rows = snapshot.data ?? const [];
           if (rows.isEmpty) {
-            return const Center(child: Text('No voice evidence received yet.'));
+            return const MeshEmptyState(
+              icon: Icons.graphic_eq,
+              title: 'No voice evidence yet',
+              message:
+                  'Verified voice clips received over the mesh appear here.',
+            );
           }
           return ListView(
-            children: [for (final row in rows) _VoiceRow(row: row)],
+            children: [
+              for (final row in rows) ...[
+                _VoiceRow(row: row),
+                const SizedBox(height: MeshSpace.sm),
+              ],
+            ],
           );
         },
       ),
@@ -48,6 +61,10 @@ class VoiceInboxScreen extends ConsumerWidget {
   }
 }
 
+/// Plain Row layout instead of ListTile — a ListTile placed directly inside
+/// MeshCard's DecoratedBox with no intervening Material ancestor triggers
+/// Flutter's "background color or ink splashes may be invisible" assertion
+/// under a full theme (same class of bug fixed in Task 8/10).
 class _VoiceRow extends StatelessWidget {
   const _VoiceRow({required this.row});
 
@@ -55,27 +72,81 @@ class _VoiceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
     try {
       final voice = VoiceObjectPayload.decode(row.payload);
-      return ListTile(
-        leading: const Icon(Icons.graphic_eq),
-        title: Text('From ${row.peerId}'),
-        subtitle: Text('${voice.bytes.length} bytes · integrity verified'),
-        trailing: IconButton(
-          icon: const Icon(Icons.play_arrow),
-          onPressed: () => _play(row.objectId, voice.bytes),
+      return MeshCard(
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: palette.live.withValues(alpha: 0.12),
+              foregroundColor: palette.live,
+              child: const Icon(Icons.graphic_eq),
+            ),
+            const SizedBox(width: MeshSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'From ${row.peerId}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    '${voice.bytes.length} bytes · integrity verified',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            IconButton.filled(
+              tooltip: 'Play voice evidence',
+              icon: const Icon(Icons.play_arrow),
+              onPressed: () => _play(row.objectId, voice.bytes),
+            ),
+          ],
         ),
       );
     } on FormatException catch (error) {
-      return ListTile(
-        leading: const Icon(Icons.error_outline, color: Colors.red),
-        title: Text('Corrupt voice evidence from ${row.peerId}'),
-        subtitle: Text(error.message),
+      return MeshCard(
+        tint: palette.ember.withValues(alpha: 0.08),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, color: palette.ember),
+            const SizedBox(width: MeshSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Corrupt voice evidence from ${row.peerId}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    error.message,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       );
     } catch (_) {
-      return ListTile(
-        leading: const Icon(Icons.error_outline, color: Colors.red),
-        title: Text('Unreadable voice evidence from ${row.peerId}'),
+      return MeshCard(
+        tint: palette.ember.withValues(alpha: 0.08),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, color: palette.ember),
+            const SizedBox(width: MeshSpace.md),
+            Expanded(
+              child: Text(
+                'Unreadable voice evidence from ${row.peerId}',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
       );
     }
   }

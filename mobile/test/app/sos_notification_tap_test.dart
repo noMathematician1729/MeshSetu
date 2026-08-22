@@ -63,7 +63,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.byType(CompactSosPacketScreen), findsOneWidget);
-    expect(find.text('SOS packet'), findsOneWidget);
+    expect(find.text('SOS Packet'), findsOneWidget);
   });
 
   testWidgets('a non-MeshSetu payload does not navigate', (tester) async {

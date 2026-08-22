@@ -42,11 +42,10 @@ void main() {
     await tester.enterText(fields.at(3), 'Ravi Patel');
     await tester.enterText(fields.at(4), '+919876543211');
     final save = find.text('Save emergency profile');
-    await tester.scrollUntilVisible(
-      save,
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.drag(find.byType(ListView), const Offset(0, -1200));
+    await tester.pump();
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pump();
     await tester.tap(save);
     await tester.pump();
 

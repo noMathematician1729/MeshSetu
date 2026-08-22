@@ -68,7 +68,7 @@ void main() {
       expect(find.textContaining('Connection failed'), findsNothing);
 
       await tester.enterText(find.byType(TextField), 'offline GATT message');
-      await tester.tap(find.byIcon(Icons.send));
+      await tester.tap(find.byIcon(Icons.send_rounded));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
@@ -83,8 +83,9 @@ void main() {
     },
   );
 
-  testWidgets('room chat prioritizes connected mesh peers over cloud status',
-      (tester) async {
+  testWidgets('room chat prioritizes connected mesh peers over cloud status', (
+    tester,
+  ) async {
     final database = MeshDatabase.forTesting(NativeDatabase.memory());
     final onboarding = await _onboardingRepository();
     final container = ProviderContainer(
@@ -112,9 +113,6 @@ void main() {
     expect(find.text('Mesh: 2 peers'), findsOneWidget);
     expect(find.byIcon(Icons.bluetooth_connected), findsOneWidget);
     expect(find.text('Cloud: disabled'), findsOneWidget);
-    expect(
-      find.text('Event mode is off — messages will queue.'),
-      findsNothing,
-    );
+    expect(find.text('Event mode is off — messages will queue.'), findsNothing);
   });
 }

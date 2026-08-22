@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
-import '../../app/event_mode_screen.dart' show meshEventTaskCallback;
+import '../../app/mesh_event_task.dart' show meshEventTaskCallback;
 import '../../app/mesh_bridge_client.dart' show MeshStatus;
 import '../../app/providers.dart';
 import '../../app/room_mesh_bootstrap.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import '../join/manifest.dart';
 import 'room_chat_screen.dart';
 import 'room_presence.dart';
@@ -155,18 +157,13 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
     final manifest = widget.manifest;
     final room = widget.room;
     final invite = EventManifestCodec.encode(manifest, roomId: room.roomId);
-    return Scaffold(
-      appBar: AppBar(title: Text(room.name)),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+    return MeshPage(
+      title: room.name,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('ROOM LOBBY', style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 4),
-          Text(
-            manifest.siteName,
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 12),
+          MeshMicroLabel(manifest.siteName),
+          const SizedBox(height: MeshSpace.md),
           meshStatus.when(
             data: (status) => _MeshStatusBanner(
               status: status,
@@ -176,28 +173,35 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
           ),
-          const SizedBox(height: 16),
-          Center(
-            child: SizedBox.square(
-              dimension: 284,
-              child: Container(
-                color: Colors.white,
-                padding: const EdgeInsets.all(12),
-                child: QrImageView(
-                  data: invite,
-                  version: QrVersions.auto,
-                  backgroundColor: Colors.white,
+          const SizedBox(height: MeshSpace.lg),
+          MeshCard(
+            child: LayoutBuilder(
+              builder: (context, constraints) => Center(
+                child: SizedBox.square(
+                  dimension: constraints.maxWidth < 260
+                      ? constraints.maxWidth
+                      : 260,
+                  child: Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(MeshSpace.md),
+                    child: QrImageView(
+                      data: invite,
+                      version: QrVersions.auto,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: MeshSpace.md),
           _CodeTile(label: 'Room code', value: room.roomId),
+          const SizedBox(height: MeshSpace.sm),
           _CodeTile(label: 'Event code', value: manifest.meshCode),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            icon: const Icon(Icons.forum_outlined),
-            label: const Text('Open room chat'),
+          const SizedBox(height: MeshSpace.lg),
+          MeshFullWidthButton(
+            icon: Icons.forum_outlined,
+            label: 'Open room chat',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
                 builder: (_) => RoomChatScreen(
@@ -209,37 +213,61 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
               ),
             ),
           ),
-          const SizedBox(height: 24),
-          Text(
-            'PEOPLE IN THIS ROOM',
-            style: Theme.of(context).textTheme.labelLarge,
+          const SizedBox(height: MeshSpace.xl),
+          MeshSectionTitle(
+            'People in this room',
+            subtitle: members.isEmpty
+                ? null
+                : '${members.length} member${members.length == 1 ? '' : 's'}',
           ),
-          const SizedBox(height: 8),
           members.isEmpty
-              ? const ListTile(
-                  leading: Icon(Icons.person_outline),
-                  title: Text('Waiting for people to join'),
-                  subtitle: Text(
-                    'Members appear here over the mesh or once they scan '
-                    'the QR.',
-                  ),
+              ? const MeshEmptyState(
+                  icon: Icons.person_outline,
+                  title: 'Waiting for people to join',
+                  message:
+                      'Members appear here over the mesh or once they '
+                      'scan the QR.',
                 )
               : Column(
                   children: [
-                    for (final member in members)
-                      ListTile(
-                        leading: CircleAvatar(
-                          child: Text(
-                            member.displayName.characters.first.toUpperCase(),
-                          ),
-                        ),
-                        title: Text(member.displayName),
-                        subtitle: Text(
-                          _liveMembers.any((m) => m.memberId == member.memberId)
-                              ? 'Active now'
-                              : 'Seen over mesh',
+                    for (final member in members) ...[
+                      MeshCard(
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              backgroundColor: Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHighest,
+                              foregroundColor: MeshPalette.of(context).text,
+                              child: Text(
+                                member.displayName.characters.first
+                                    .toUpperCase(),
+                              ),
+                            ),
+                            const SizedBox(width: MeshSpace.md),
+                            Expanded(
+                              child: Text(
+                                member.displayName,
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            MeshStatusPill(
+                              label: _liveMembers.any(
+                                    (m) => m.memberId == member.memberId,
+                                  )
+                                  ? 'Active now'
+                                  : 'Seen over mesh',
+                              tone: _liveMembers.any(
+                                    (m) => m.memberId == member.memberId,
+                                  )
+                                  ? MeshStatusTone.active
+                                  : MeshStatusTone.neutral,
+                            ),
+                          ],
                         ),
                       ),
+                      const SizedBox(height: MeshSpace.sm),
+                    ],
                   ],
                 ),
         ],
@@ -265,65 +293,100 @@ class _MeshStatusBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
     if (!status.eventModeRunning) {
       final blockedReason = status.blockedReason;
-      return Card(
-        color: Theme.of(context).colorScheme.secondaryContainer,
-        child: ListTile(
-          leading: const Icon(Icons.bluetooth_disabled),
-          title: Text(blockedReason != null ? 'Event mode is blocked' : 'Event mode is off'),
-          subtitle: Text(
-            blockedReason ??
-                'Messages will queue until you start the BLE relay service.',
-          ),
-          trailing: FilledButton(
-            onPressed: starting ? null : onStartEventMode,
-            child: starting
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Start'),
-          ),
+      return MeshCard(
+        child: Row(
+          children: [
+            Icon(Icons.bluetooth_disabled, color: palette.textMuted),
+            const SizedBox(width: MeshSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    blockedReason != null
+                        ? 'Event mode is blocked'
+                        : 'Event mode is off',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    blockedReason ??
+                        'Messages will queue until you start the BLE relay service.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            FilledButton(
+              onPressed: starting ? null : onStartEventMode,
+              child: starting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Start'),
+            ),
+          ],
         ),
       );
     }
     final peerCount = status.peerCount;
-    return Card(
+    return MeshCard(
       child: Column(
-        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ListTile(
-            leading: Icon(
-              peerCount > 0
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_searching,
-            ),
-            title: Text(
-              peerCount > 0
-                  ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'} connected'
-                  : 'Mesh: no peers yet',
-            ),
-            subtitle: Text(
-              peerCount > 0
-                  ? 'Messages relay over Bluetooth.'
-                  : 'Move closer to another device with event mode on.',
-            ),
+          Row(
+            children: [
+              Icon(
+                peerCount > 0
+                    ? Icons.bluetooth_connected
+                    : Icons.bluetooth_searching,
+                color: peerCount > 0 ? palette.live : palette.mesh,
+              ),
+              const SizedBox(width: MeshSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      peerCount > 0
+                          ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'} connected'
+                          : 'Mesh: no peers yet',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      peerCount > 0
+                          ? 'Messages relay over Bluetooth.'
+                          : 'Move closer to another device with event mode on.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          if (status.siteMismatchDetected)
-            const ListTile(
-              dense: true,
-              leading: Icon(Icons.warning_amber, size: 20),
-              title: Text(
-                'A nearby device is using a different event/site code',
-                style: TextStyle(fontSize: 13),
-              ),
-              subtitle: Text(
-                'It will not appear here or connect until it joins this event.',
-                style: TextStyle(fontSize: 12),
-              ),
+          if (status.siteMismatchDetected) ...[
+            const SizedBox(height: MeshSpace.sm),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.warning_amber, size: 18, color: palette.caution),
+                const SizedBox(width: MeshSpace.sm),
+                Expanded(
+                  child: Text(
+                    'A nearby device is using a different event/site code. '
+                    'It will not appear here or connect until it joins '
+                    'this event.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
             ),
+          ],
         ],
       ),
     );
@@ -337,11 +400,24 @@ class _CodeTile extends StatelessWidget {
   final String value;
 
   @override
-  Widget build(BuildContext context) => Card(
-    child: ListTile(
-      leading: const Icon(Icons.key_outlined),
-      title: Text(label),
-      subtitle: SelectableText(value),
+  Widget build(BuildContext context) => MeshCard(
+    child: Row(
+      children: [
+        Icon(Icons.key_outlined, color: MeshPalette.of(context).textMuted),
+        const SizedBox(width: MeshSpace.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              MeshMicroLabel(label),
+              SelectableText(
+                value,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ],
+          ),
+        ),
+      ],
     ),
   );
 }

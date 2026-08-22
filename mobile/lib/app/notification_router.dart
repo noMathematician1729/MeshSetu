@@ -18,10 +18,7 @@ class NotificationRouter {
       jsonEncode({'siteId': siteId, 'eventId': eventId, 'objectId': objectId});
 
   /// Payload that routes a tap to [RoomsScreen] opened on [roomId].
-  static String roomPayload({
-    required String siteId,
-    required String roomId,
-  }) =>
+  static String roomPayload({required String siteId, required String roomId}) =>
       jsonEncode({'type': 'room', 'siteId': siteId, 'roomId': roomId});
 
   static Future<void> configure(FlutterLocalNotificationsPlugin plugin) async {

@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/emergency_gestures.dart';
 import '../../app/providers.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import 'onboarding_profile.dart';
 
 /// Startup gate for the sender identity requirement. The profile is read from
@@ -19,13 +21,24 @@ class OnboardingGate extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(onboardingProfileProvider);
     return profile.when(
-      loading: () =>
-          const Scaffold(body: Center(child: CircularProgressIndicator())),
+      loading: () => Scaffold(
+        backgroundColor: MeshPalette.of(context).canvas,
+        body: const Center(child: CircularProgressIndicator()),
+      ),
       error: (error, _) => Scaffold(
+        backgroundColor: MeshPalette.of(context).canvas,
         body: Center(
           child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Text('Unable to load your emergency profile: $error'),
+            padding: const EdgeInsets.all(MeshSpace.lg),
+            child: MeshEmptyState(
+              icon: Icons.error_outline,
+              title: 'Profile unavailable',
+              message: 'Unable to load your emergency profile: $error',
+              action: FilledButton(
+                onPressed: () => ref.invalidate(onboardingProfileProvider),
+                child: const Text('Try again'),
+              ),
+            ),
           ),
         ),
       ),
@@ -38,6 +51,13 @@ class OnboardingGate extends ConsumerWidget {
   }
 }
 
+/// Onboarding form. NOTE: `test/feature/onboarding_gesture_enrollment_test
+/// .dart` locks the TextField tab order (name, phone, language, first
+/// contact name, first contact phone), the root `ListView`, and the exact
+/// button/error strings ('Save emergency profile', 'Enable Emergency
+/// gestures...') — this rewrite is a restyle of that same single-scroll
+/// form rather than a multi-page wizard, to avoid rewriting that test's
+/// interaction model as an unrelated side effect of the visual revamp.
 class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({super.key, this.initialProfile, this.onComplete});
 
@@ -183,19 +203,36 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Emergency profile setup')),
-    body: SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.all(20),
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return MeshPage(
+      title: widget.initialProfile == null
+          ? 'Emergency Profile'
+          : 'Edit Profile',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Set up the information attached to your encrypted SOS packet. '
-            'This profile is stored securely on this device.',
+          MeshCard(
+            tint: palette.primary.withValues(alpha: 0.08),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.health_and_safety_outlined, color: palette.primary),
+                const SizedBox(width: MeshSpace.sm),
+                Expanded(
+                  child: Text(
+                    'This encrypted information travels with your SOS and stays on this device.',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: MeshSpace.lg),
+          const MeshMicroLabel('Identity'),
+          const SizedBox(height: MeshSpace.sm),
           _field(_name, 'Your name', required: true),
-          const SizedBox(height: 12),
+          const SizedBox(height: MeshSpace.sm),
           _field(
             _phone,
             'Your phone number',
@@ -203,109 +240,113 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
             keyboardType: TextInputType.phone,
             helperText: 'Include country code, e.g. +919876543210',
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: MeshSpace.sm),
           _field(_language, 'Preferred language', required: true),
-          const SizedBox(height: 20),
-          Text(
+          const SizedBox(height: MeshSpace.lg),
+          MeshSectionTitle(
             'Emergency contacts',
-            style: Theme.of(context).textTheme.titleMedium,
+            subtitle: 'People notified when you send an SOS',
           ),
-          const SizedBox(height: 8),
           for (var index = 0; index < _contacts.length; index++) ...[
             _contactFields(index),
-            const SizedBox(height: 8),
+            const SizedBox(height: MeshSpace.sm),
           ],
           if (_contacts.length < 10)
             OutlinedButton.icon(
-              onPressed: () => setState(() => _contacts.add(_ContactEditors())),
+              onPressed: () =>
+                  setState(() => _contacts.add(_ContactEditors())),
               icon: const Icon(Icons.add),
               label: const Text('Add emergency contact'),
             ),
           if (_requiresGestureEnrollment) ...[
-            const SizedBox(height: 20),
-            Card(
-              color: _gestureServiceEnabled
-                  ? Colors.green.shade50
-                  : Colors.red.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Required: emergency gestures',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      'Enable MeshSetu emergency gestures in Android Accessibility settings. '
-                      '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence while Event Mode is active—even after the app UI is closed.',
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _checkingGestures
-                          ? 'Checking Android Accessibility permission…'
-                          : _gestureServiceEnabled
-                          ? 'Emergency gestures are enabled.'
-                          : 'Emergency gestures are not enabled yet.',
-                      style: TextStyle(
-                        color: _gestureServiceEnabled
-                            ? Colors.green.shade800
-                            : Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        FilledButton.icon(
+            const SizedBox(height: MeshSpace.lg),
+            MeshCard(
+              tint: _gestureServiceEnabled
+                  ? palette.live.withValues(alpha: 0.1)
+                  : palette.ember.withValues(alpha: 0.08),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Required: emergency gestures',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: MeshSpace.xs),
+                  const Text(
+                    'Enable MeshSetu emergency gestures in Android Accessibility settings. '
+                    '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence while Event Mode is active—even after the app UI is closed.',
+                  ),
+                  const SizedBox(height: MeshSpace.sm),
+                  MeshStatusPill(
+                    label: _checkingGestures
+                        ? 'Checking permission…'
+                        : _gestureServiceEnabled
+                        ? 'Enabled'
+                        : 'Not enabled',
+                    tone: _checkingGestures
+                        ? MeshStatusTone.neutral
+                        : _gestureServiceEnabled
+                        ? MeshStatusTone.active
+                        : MeshStatusTone.critical,
+                  ),
+                  const SizedBox(height: MeshSpace.sm),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
                           onPressed: _checkingGestures
                               ? null
                               : _openGestureSettings,
                           icon: const Icon(Icons.settings_accessibility),
-                          label: const Text('Open Accessibility settings'),
+                          label: const Text(
+                            'Open Accessibility settings',
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          tooltip: 'Check again',
-                          onPressed: _checkingGestures
-                              ? null
-                              : _refreshGestureEnrollment,
-                          icon: const Icon(Icons.refresh),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                      ),
+                      const SizedBox(width: MeshSpace.sm),
+                      IconButton(
+                        tooltip: 'Check again',
+                        onPressed: _checkingGestures
+                            ? null
+                            : _refreshGestureEnrollment,
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ],
-          const SizedBox(height: 20),
-          Text(
-            'Medical information (optional)',
-            style: Theme.of(context).textTheme.titleMedium,
+          const SizedBox(height: MeshSpace.lg),
+          MeshSectionTitle(
+            'Medical information',
+            subtitle: 'Optional, but helps responders act quickly',
           ),
-          const SizedBox(height: 8),
           _field(_bloodGroup, 'Blood group'),
-          const SizedBox(height: 12),
+          const SizedBox(height: MeshSpace.sm),
           _field(_allergies, 'Allergies', maxLines: 2),
-          const SizedBox(height: 12),
+          const SizedBox(height: MeshSpace.sm),
           _field(_conditions, 'Medical conditions', maxLines: 2),
           if (_error != null) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: MeshSpace.md),
             Text(
               _error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: palette.ember),
             ),
           ],
-          const SizedBox(height: 20),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: Text(_saving ? 'Saving profile…' : 'Save emergency profile'),
+          const SizedBox(height: MeshSpace.lg),
+          MeshFullWidthButton(
+            label: _saving ? 'Saving profile…' : 'Save emergency profile',
+            busy: _saving,
+            onPressed: _save,
           ),
         ],
       ),
-    ),
-  );
+    );
+  }
 
   Widget _field(
     TextEditingController controller,
@@ -321,42 +362,45 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     decoration: InputDecoration(
       labelText: required ? '$label *' : label,
       helperText: helperText,
-      border: const OutlineInputBorder(),
     ),
   );
 
   Widget _contactFields(int index) {
     final contact = _contacts[index];
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(child: Text('Contact ${index + 1}')),
-                if (_contacts.length > 1)
-                  IconButton(
-                    tooltip: 'Remove contact',
-                    onPressed: () => setState(() {
-                      final removed = _contacts.removeAt(index);
-                      removed.dispose();
-                    }),
-                    icon: const Icon(Icons.remove_circle_outline),
-                  ),
-              ],
-            ),
-            _field(contact.name, 'Name', required: true),
-            const SizedBox(height: 8),
-            _field(
-              contact.phone,
-              'Phone number',
-              required: true,
-              keyboardType: TextInputType.phone,
-              helperText: 'Include country code, e.g. +919876543210',
-            ),
-          ],
-        ),
+    return MeshCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Contact ${index + 1}',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              if (_contacts.length > 1)
+                IconButton(
+                  tooltip: 'Remove contact',
+                  onPressed: () => setState(() {
+                    final removed = _contacts.removeAt(index);
+                    removed.dispose();
+                  }),
+                  icon: const Icon(Icons.remove_circle_outline),
+                ),
+            ],
+          ),
+          const SizedBox(height: MeshSpace.xs),
+          _field(contact.name, 'Name', required: true),
+          const SizedBox(height: MeshSpace.sm),
+          _field(
+            contact.phone,
+            'Phone number',
+            required: true,
+            keyboardType: TextInputType.phone,
+            helperText: 'Include country code, e.g. +919876543210',
+          ),
+        ],
       ),
     );
   }

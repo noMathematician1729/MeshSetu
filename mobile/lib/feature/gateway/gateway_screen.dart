@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 
 /// This screen lets the operator point the phone at a reachable dashboard
 /// address (local Wi-Fi or an HTTPS tunnel) and flip it into gateway mode —
@@ -32,48 +34,76 @@ class _GatewayScreenState extends ConsumerState<GatewayScreen> {
   @override
   Widget build(BuildContext context) {
     final enabled = ref.watch(gatewayEnabledProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Gateway')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Enable this on the phone that receives BLE SOS packets and can '
-              'reach the control-room dashboard. Every other phone stays '
-              'purely peer-to-peer.',
+    return MeshPage(
+      title: 'Emergency Gateway',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const MeshStatusPill(
+            label: 'Advanced setting',
+            icon: Icons.security_outlined,
+          ),
+          const SizedBox(height: MeshSpace.md),
+          Text(
+            'Enable this only on a phone that can receive Bluetooth SOS packets and reach the control room.',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(height: MeshSpace.lg),
+          TextField(
+            controller: _urlController,
+            decoration: const InputDecoration(
+              labelText: 'Dashboard base URL',
+              hintText: productionBackendUrl,
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _urlController,
-              decoration: const InputDecoration(
-                labelText: 'Dashboard base URL',
-                hintText: productionBackendUrl,
-                border: OutlineInputBorder(),
-              ),
-              onChanged: (v) => ref.read(gatewayUrlProvider.notifier).state = v,
+            onChanged: (v) => ref.read(gatewayUrlProvider.notifier).state = v,
+          ),
+          const SizedBox(height: MeshSpace.md),
+          TextField(
+            controller: _keyController,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: 'Dashboard gateway key',
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _keyController,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'Dashboard gateway key',
-                border: OutlineInputBorder(),
-              ),
-              onChanged: (v) =>
-                  ref.read(gatewayDemoKeyProvider.notifier).state = v,
+            onChanged: (v) =>
+                ref.read(gatewayDemoKeyProvider.notifier).state = v,
+          ),
+          const SizedBox(height: MeshSpace.lg),
+          MeshCard(
+            child: Row(
+              children: [
+                Icon(
+                  Icons.router_outlined,
+                  color: MeshPalette.of(context).textMuted,
+                ),
+                const SizedBox(width: MeshSpace.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Act as emergency gateway',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      Text(
+                        enabled
+                            ? 'Encrypted SOS packets are forwarded when reachable.'
+                            : 'This phone remains peer-to-peer only.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: enabled,
+                  onChanged: (v) =>
+                      ref.read(gatewayEnabledProvider.notifier).state = v,
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            SwitchListTile(
-              title: const Text('Act as gateway'),
-              value: enabled,
-              onChanged: (v) =>
-                  ref.read(gatewayEnabledProvider.notifier).state = v,
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

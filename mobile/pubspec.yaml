@@ -56,10 +56,31 @@ flutter:
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/joiner-epoch-99-avg-1.int8.onnx
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/tokens.txt
     - assets/icon/logo.png
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+          weight: 400
+        - asset: assets/fonts/Inter-Variable.ttf
+          weight: 500
+        - asset: assets/fonts/Inter-Variable.ttf
+          weight: 600
+        - asset: assets/fonts/Inter-Variable.ttf
+          weight: 700
+    - family: Space Grotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-Variable.ttf
+          weight: 400
+        - asset: assets/fonts/SpaceGrotesk-Variable.ttf
+          weight: 500
+        - asset: assets/fonts/SpaceGrotesk-Variable.ttf
+          weight: 600
+        - asset: assets/fonts/SpaceGrotesk-Variable.ttf
+          weight: 700
 
 flutter_launcher_icons:
   android: true
   image_path: assets/icon/logo.png
-  adaptive_icon_background: "#0b4f4a"
+  adaptive_icon_background: "#160D0E"
   adaptive_icon_foreground: assets/icon/logo_foreground.png
   min_sdk_android: 29

@@ -35,7 +35,10 @@ abstract interface class LiveRoomMessageTransport {
   /// server confirms at least one other member received it, `false` if the
   /// channel is unreachable, the send fails, or no confirmation arrives
   /// within the transport's ack timeout.
-  Future<bool> sendRoomMessage({required String messageId, required String text});
+  Future<bool> sendRoomMessage({
+    required String messageId,
+    required String text,
+  });
 }
 
 /// Live room membership shared through the event backend. Mesh announcements

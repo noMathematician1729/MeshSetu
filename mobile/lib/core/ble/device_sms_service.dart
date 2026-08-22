@@ -32,8 +32,9 @@ abstract final class DeviceSmsService {
     final coords = hasLocation
         ? '${latitude.toStringAsFixed(5)},${longitude.toStringAsFixed(5)}'
         : null;
-    final mapsUrl =
-        coords != null ? 'https://maps.google.com/?q=$coords' : null;
+    final mapsUrl = coords != null
+        ? 'https://maps.google.com/?q=$coords'
+        : null;
 
     final parts = <String>[
       'EMERGENCY: $reporterName needs help.',
@@ -55,13 +56,8 @@ abstract final class DeviceSmsService {
   /// A number can only be sent on Android; non-Android platforms return 0.
   /// Individual send failures are logged but do not throw — emergency delivery
   /// must not stop partway through a contact list.
-  static Future<int> sendToAll(
-    List<String> phones,
-    String message,
-  ) async {
-    if (!defaultTargetPlatform
-        .toString()
-        .contains('TargetPlatform.android')) {
+  static Future<int> sendToAll(List<String> phones, String message) async {
+    if (!defaultTargetPlatform.toString().contains('TargetPlatform.android')) {
       // SmsManager is Android-only. On other platforms skip silently.
       return 0;
     }
@@ -69,7 +65,8 @@ abstract final class DeviceSmsService {
     for (final phone in phones) {
       if (phone.trim().isEmpty) continue;
       try {
-        final ok = await _channel.invokeMethod<bool>('sendSms', {
+        final ok =
+            await _channel.invokeMethod<bool>('sendSms', {
               'phone': phone.trim(),
               'message': message,
             }) ??

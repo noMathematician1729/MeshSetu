@@ -1,505 +1,42 @@
+// ignore_for_file: unused_element, unused_field
+
 import 'dart:async';
-import 'dart:convert';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart'
     hide NotificationVisibility;
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/ble/device_key_store.dart';
 import '../core/ble/device_sms_service.dart';
-import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
-import '../core/data/database.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
+import '../feature/home/emergency_home_screen.dart';
 import '../feature/join/join_screen.dart';
 import '../feature/location/location_capture.dart';
 import '../feature/onboarding/onboarding_screen.dart';
-import '../feature/rooms/room_message_packet.dart';
+import '../feature/profile/profile_screen.dart';
+import '../feature/rooms/room_chat_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/sos/sos_screen.dart';
-import '../feature/sos/incident_detail_screen.dart';
+import '../feature/sos/emergency_active_screen.dart';
 import '../feature/voice/voice_recorder.dart';
+import '../ui/components/mesh_components.dart';
+import '../ui/theme/mesh_tokens.dart';
+import '../ui/theme/theme_controller.dart';
 import 'emergency_gestures.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
+import 'mesh_event_task.dart';
 import 'event_mode_launcher.dart';
 import 'incident_summary.dart';
-import 'notification_router.dart';
 import 'providers.dart';
-import 'room_message_notifications.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
-
-const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
-final FlutterLocalNotificationsPlugin _sosNotifications =
-    FlutterLocalNotificationsPlugin();
-bool _sosNotificationsInitialized = false;
-
-Future<void> _showSosNotification({
-  required ReceivedObject received,
-  required String detail,
-  int? notificationId,
-}) async {
-  try {
-    if (!_sosNotificationsInitialized) {
-      await NotificationRouter.configure(_sosNotifications);
-      _sosNotificationsInitialized = true;
-    }
-    var id = notificationId ?? (received.envelope.objectId & 0x7fffffff);
-    if (id == 0) id = 1;
-    await _sosNotifications.show(
-      id: id,
-      title: 'SOS RECEIVED',
-      body: detail,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _sosNotificationChannelId,
-          'SOS alerts',
-          channelDescription: 'Nearby MeshSetu emergency signals',
-          importance: Importance.max,
-          priority: Priority.max,
-          playSound: true,
-          enableVibration: true,
-          ticker: 'SOS received',
-          category: AndroidNotificationCategory.alarm,
-          visibility: NotificationVisibility.public,
-          onlyAlertOnce: true,
-        ),
-      ),
-      payload: NotificationRouter.incidentPayload(
-        siteId: received.envelope.siteId,
-        eventId: received.envelope.eventId,
-        objectId: received.envelope.objectId,
-      ),
-    );
-  } catch (_) {
-    // A notification failure must not stop BLE relaying.
-  }
-}
-
-Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  await SosAlertNotifications.show(
-    id: SosAlertNotifications.idForKey(alert.dedupeKey),
-    title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED · MESH',
-    body: alert.isTest
-        ? 'Nearby BLE transport test received.'
-        : SosAlertNotifications.compactPacketBody(
-            alert,
-            availability:
-                'Offline-ready: attempting verified detail lookup when available.',
-          ),
-    payload: alert.isTest
-        ? null
-        : SosIncidentNavigator.payloadForCompactAlert(alert),
-  );
-}
-
-/// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
-/// controller is deliberately created in this task isolate, not the UI one.
-@pragma('vm:entry-point')
-void meshEventTaskCallback() {
-  FlutterForegroundTask.setTaskHandler(_MeshEventTaskHandler());
-}
-
-class _MeshEventTaskHandler extends TaskHandler {
-  MeshEventController? _controller;
-  bool _sosPending = false;
-  bool _identityRequestPending = false;
-  bool _debugLossEnabled = false;
-  StreamSubscription<ReceivedObject>? _incomingSubscription;
-  int _notificationGeneration = 0;
-  final Set<String> _compactAlertKeys = {};
-
-  /// RoomId of the room chat screen currently visible to the user, or null.
-  /// Set via the 'active_room' message from [RoomChatScreen]. When non-null,
-  /// notifications for that room are suppressed (Task 5).
-  String? _activeRoomId;
-
-  @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
-    DartPluginRegistrant.ensureInitialized();
-    try {
-      final savedConfiguration = await FlutterForegroundTask.getData<String>(
-        key: meshSiteConfigurationKey,
-      );
-      final configuration = savedConfiguration == null
-          ? MeshSiteConfiguration.demo
-          : MeshSiteConfiguration.decode(savedConfiguration) ??
-                MeshSiteConfiguration.demo;
-      final controller = MeshEventController(
-        configuration: configuration,
-        zoneResolver: MeshEventController.demoZoneResolver,
-        onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_peers',
-          'peers': [
-            for (final peer in peers)
-              {
-                'peerId': peer.peerId,
-                'connected': peer.connected,
-                'mtu': peer.mtu,
-                'rssi': peer.rssi,
-                'queuedObjects': peer.queuedObjects,
-                'lastSeenMs': peer.lastSeenMs,
-              },
-          ],
-        }),
-        onMeshStatus: (status) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_status',
-          'value': status,
-        }),
-        onMetrics: (metrics) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_metric',
-          'metrics': [
-            for (final metric in metrics)
-              {
-                'kind': metric.kind,
-                'peerId': metric.peerId,
-                'value': metric.value,
-                'objectId': metric.objectId,
-                'detail': metric.detail,
-              },
-          ],
-        }),
-        onBeaconObservations: (observations) =>
-            FlutterForegroundTask.sendDataToMain({
-              'status': 'mesh_beacons',
-              'beacons': [
-                for (final beacon in observations)
-                  {
-                    'anchorId': beacon.anchorId,
-                    'rssi': beacon.rssi,
-                    'observedAtMs': beacon.observedAtMs,
-                  },
-              ],
-            }),
-        onZoneEstimate: (estimate) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_zone',
-          'zone': estimate.logicalZone,
-          'anchorId': estimate.anchorId,
-          'uncertainty': estimate.uncertainty,
-        }),
-        onCompactSosAlert: _announceCompactSos,
-      );
-      await controller.start();
-      _controller = controller;
-      _incomingSubscription = controller.coordinator?.incoming.listen((
-        received,
-      ) {
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_metric',
-          'metrics': [
-            {
-              'kind': 'object_received',
-              'peerId': received.peerId,
-              'value': received.envelope.payload.length,
-              'objectId': received.envelope.objectId,
-            },
-          ],
-        });
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_received',
-          'received': MeshBridge.receivedToJson(received),
-        });
-        if (received.envelope.payloadType == PayloadType.structuredSos) {
-          unawaited(_announceReceivedSos(received));
-        } else if (received.envelope.payloadType == PayloadType.roomMessage) {
-          unawaited(_announceReceivedRoomMessage(received));
-        }
-      });
-      controller.setDebugLossInjection(_debugLossEnabled);
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'started',
-        'localEphemeralId': controller.localEphemeralId,
-      });
-      if (_identityRequestPending) {
-        _identityRequestPending = false;
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'started',
-          'localEphemeralId': controller.localEphemeralId,
-        });
-      }
-      if (_sosPending) {
-        _sosPending = false;
-        unawaited(_sendTestSos(controller));
-      }
-    } catch (error) {
-      final message = error is DeviceKeyStoreException
-          ? error.userMessage
-          : error.toString();
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'error',
-        'message': message,
-      });
-    }
-  }
-
-  @override
-  void onRepeatEvent(DateTime timestamp) {}
-
-  @override
-  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
-    await _incomingSubscription?.cancel();
-    _incomingSubscription = null;
-    await _controller?.stop();
-    _controller = null;
-    FlutterForegroundTask.sendDataToMain(const {'status': 'stopped'});
-  }
-
-  @override
-  void onReceiveData(Object data) {
-    if (data is Map && data['meshSiteConfiguration'] is String) {
-      final configuration = MeshSiteConfiguration.decode(
-        data['meshSiteConfiguration'] as String,
-      );
-      if (configuration != null &&
-          configuration.siteId != _controller?.configuration.siteId) {
-        unawaited(_restartForSite(configuration));
-      }
-      return;
-    }
-    if (data is Map && data['mesh_identity_request'] == true) {
-      final controller = _controller;
-      if (controller == null) {
-        _identityRequestPending = true;
-      } else {
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'started',
-          'localEphemeralId': controller.localEphemeralId,
-        });
-      }
-      return;
-    }
-    if (data is Map && data.containsKey('active_room')) {
-      // null means the user left the room screen; a non-null string means they
-      // are viewing that room. Notifications for the active room are suppressed.
-      final value = data['active_room'];
-      _activeRoomId = value is String && value.isNotEmpty ? value : null;
-      return;
-    }
-    if (data is Map && data['debugLoss'] is bool) {
-      _debugLossEnabled = data['debugLoss'] as bool;
-      _controller?.setDebugLossInjection(_debugLossEnabled);
-      return;
-    }
-    if (data is Map && data['sendMeshObject'] is Map) {
-      final envelope = MeshBridge.envelopeFromJson(
-        (data['sendMeshObject'] as Map).cast<Object?, Object?>(),
-      );
-      unawaited(_submitMeshObject(envelope));
-      return;
-    }
-    if (data is Map && data['broadcast_ceal_sos'] == true) {
-      final originId = data['originId'] as int?;
-      final reporterUid = data['reporterUid'] as String?;
-      final flags = data['flags'] as int? ?? MeshSosAdvertisement.alertFlag;
-      final controller = _controller;
-      if (controller != null) {
-        unawaited(
-          controller.broadcastCompactSos(
-            isTest: false,
-            originId: originId,
-            reporterUidHex: reporterUid,
-            emergencyType: SosEmergencyType.fromFlags(flags),
-          ),
-        );
-        FlutterForegroundTask.sendDataToMain(const {
-          'status': 'ceal_sos_broadcast_ok',
-        });
-      } else {
-        FlutterForegroundTask.sendDataToMain(const {
-          'status': 'sos_failed',
-          'message': 'event mode not ready',
-        });
-      }
-      return;
-    }
-    if (data != 'send_test_sos') return;
-    final controller = _controller;
-    if (controller == null) {
-      _sosPending = true;
-    } else {
-      unawaited(_sendTestSos(controller));
-    }
-  }
-
-  Future<void> _restartForSite(MeshSiteConfiguration configuration) async {
-    await _incomingSubscription?.cancel();
-    _incomingSubscription = null;
-    await _controller?.stop();
-    _controller = null;
-    await FlutterForegroundTask.saveData(
-      key: meshSiteConfigurationKey,
-      value: configuration.encode(),
-    );
-    await onStart(DateTime.now(), TaskStarter.developer);
-  }
-
-  Future<void> _sendTestSos(MeshEventController controller) async {
-    try {
-      final envelope = await controller.sendTestObject();
-      if (envelope == null) {
-        FlutterForegroundTask.sendDataToMain(const {'status': 'sos_failed'});
-      } else {
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_test_origin_submitted',
-          'envelope': MeshBridge.envelopeToJson(envelope),
-        });
-      }
-    } catch (error) {
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'sos_failed',
-        'message': error.toString(),
-      });
-    }
-  }
-
-  Future<void> _submitMeshObject(MeshEnvelope envelope) async {
-    final controller = _controller;
-    if (controller == null || controller.coordinator == null) {
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'mesh_submit_result',
-        'objectId': envelope.objectId,
-        'accepted': false,
-        'reason': 'event mode is not ready',
-      });
-      return;
-    }
-    try {
-      final gatewayPacket = await controller.coordinator!.encryptForGateway(
-        envelope,
-      );
-      if (envelope.payloadType == PayloadType.structuredSos) {
-        String reporterUid = '';
-        var emergencyType = SosEmergencyType.general;
-        try {
-          final sos = StructuredSosPayload.decode(envelope.payload);
-          reporterUid = sos.reporter?.reporterUid ?? '';
-          emergencyType = SosEmergencyType.fromHazards(sos.hazards);
-        } catch (_) {
-          // A non-identity structured payload still broadcasts a routing alert.
-        }
-        unawaited(
-          controller.broadcastCompactSos(
-            originId: envelope.originEphemeralId,
-            sequence: envelope.objectId & 0xffff,
-            reporterUidHex: reporterUid,
-            emergencyType: emergencyType,
-          ),
-        );
-      }
-      await controller.coordinator!.send(envelope);
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'mesh_submit_result',
-        'objectId': envelope.objectId,
-        'accepted': true,
-      });
-      if (envelope.payloadType == PayloadType.structuredSos ||
-          envelope.payloadType == PayloadType.voiceObject) {
-        FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_origin_submitted',
-          'envelope': MeshBridge.envelopeToJson(envelope),
-          'encryptedBytes': base64Encode(gatewayPacket.bytes),
-        });
-      }
-    } catch (error) {
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'mesh_submit_result',
-        'objectId': envelope.objectId,
-        'accepted': false,
-        'reason': '$error',
-      });
-    }
-  }
-
-  Future<void> _announceReceivedRoomMessage(ReceivedObject received) async {
-    final alert = roomMessageAlertFor(
-      received: received,
-      localEphemeralId: _controller?.localEphemeralId,
-      activeRoomId: _activeRoomId,
-    );
-    if (alert == null) return;
-    await RoomMessageNotifications.show(
-      alert: alert,
-      payload: RoomMessageNotifications.roomPayload(
-        siteId: alert.siteId,
-        roomId: alert.roomId,
-      ),
-    );
-  }
-
-  void _announceCompactSos(MeshSosAdvertisement alert) {
-    // BLE advertisements repeat. A single compact packet must produce one
-    // notification and one control-room lookup for this Event Mode session.
-    if (!_compactAlertKeys.add(alert.dedupeKey)) return;
-    unawaited(_showCompactSosNotification(alert));
-    // Forward to the UI isolate so MeshBridgeClient can relay to admin backend.
-    if (!alert.isTest) {
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'compact_sos_received',
-        'originId': alert.originId,
-        'sequence': alert.sequence,
-        'flags': alert.flags,
-        'ttl': alert.ttl,
-        'siteFingerprint': alert.siteFingerprint,
-        'dedupeKey': alert.dedupeKey,
-        'reporterUid': alert.reporterUidHex,
-      });
-    }
-  }
-
-  Future<void> _announceReceivedSos(ReceivedObject received) async {
-    final generation = ++_notificationGeneration;
-    late final String detail;
-    try {
-      final sos = StructuredSosPayload.decode(received.envelope.payload);
-      final location = sos.latitude == null || sos.longitude == null
-          ? 'location unavailable'
-          : 'GPS ${sos.latitude!.toStringAsFixed(5)}, '
-                '${sos.longitude!.toStringAsFixed(5)}';
-      final reporter = sos.reporter?.name;
-      detail = reporter != null && reporter.isNotEmpty
-          ? 'From $reporter · ${sos.triagePriority.name} · $location'
-          : 'Priority ${sos.triagePriority.name} · $location';
-    } catch (_) {
-      // A random/test structured frame is not an SOS notification.
-      return;
-    }
-    final compactKey =
-        '${MeshGatt.siteFingerprint(received.envelope.siteId, namespace: MeshSiteConfiguration.forSite(received.envelope.siteId).namespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
-    final updatesCompactAlert = _compactAlertKeys.contains(compactKey);
-    await _showSosNotification(
-      received: received,
-      detail: detail,
-      notificationId: updatesCompactAlert
-          ? SosAlertNotifications.idForKey(compactKey)
-          : null,
-    );
-    try {
-      await FlutterForegroundTask.updateService(
-        notificationTitle: 'SOS RECEIVED',
-        notificationText: detail,
-      );
-    } catch (_) {
-      // The separate SOS notification above remains the user-visible alert.
-    }
-    await Future<void>.delayed(const Duration(seconds: 6));
-    if (generation != _notificationGeneration) return;
-    try {
-      await FlutterForegroundTask.updateService(
-        notificationTitle: 'MeshSetu event mode active',
-        notificationText: 'BLE relay is listening for nearby peers',
-      );
-    } catch (_) {}
-  }
-}
 
 /// Port of `in.meshsetu.app.MainActivity` (Kotlin `MainActivity.kt`), plus
 /// the Dev B navigation entry point into Join/Rooms/SOS once the mesh is up.
@@ -523,6 +60,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _sttStatus = 'not run';
   bool _sttTesting = false;
   bool _sosPacketSending = false;
+  SosEmergencyType _selectedEmergencyType = SosEmergencyType.general;
+  String _sosDescription = '';
   bool _gestureConfirmationShowing = false;
   bool _gestureServiceEnabled = false;
   StreamSubscription<SosEmergencyType>? _typedSosGestureSubscription;
@@ -564,7 +103,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
     unawaited(_refreshGestureServiceState());
-    unawaited(_restoreServiceState());
+    unawaited(_restoreOrStartEventMode());
+  }
+
+  Future<void> _restoreOrStartEventMode() async {
+    if (await FlutterForegroundTask.isRunningService) {
+      await _restoreServiceState();
+    } else {
+      await _startEventMode();
+    }
   }
 
   Future<void> _consumePendingTypedSosGesture() async {
@@ -1011,7 +558,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   static String _emergencyTypeLabel(int flags) {
     // Mirrors the CEAL flag→type mapping in admin/server/src/server.ts.
     const types = [
-      'general', 'fire', 'crime', 'kidnap', 'medical', 'natural_disaster',
+      'general',
+      'fire',
+      'crime',
+      'kidnap',
+      'medical',
+      'natural_disaster',
     ];
     final index = (flags >> 2) & 0x0f;
     return index < types.length ? types[index] : 'general';
@@ -1109,6 +661,25 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
+  Future<void> _chooseEmergencyType() async {
+    final emergencyType = await Navigator.of(context).push<SosEmergencyType>(
+      MaterialPageRoute(builder: (_) => const _SosTypeSelectionScreen()),
+    );
+    if (emergencyType != null && mounted) {
+      setState(() => _selectedEmergencyType = emergencyType);
+    }
+  }
+
+  Future<void> _describeSos() async {
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _DescribeSosSheet(initialText: _sosDescription),
+    );
+    if (value != null && mounted) setState(() => _sosDescription = value);
+  }
+
   Future<void> _confirmAndSendSosPacket(SosEmergencyType emergencyType) async {
     if (_sosPacketSending) return;
     final profile = await ref.read(onboardingRepositoryProvider).load();
@@ -1142,12 +713,16 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               ? site!.rooms.first.roomId
               : 'public',
           inputMode: InputMode.tap,
+          rawText: _sosDescription,
           priority: PriorityBand.p0Critical,
           emergencyType: emergencyType,
         ),
       );
-      final permission = await Permission.locationWhenInUse.request();
-      final locationResult = permission.isGranted
+      final locationEnabled = ref.read(locationSharingProvider);
+      final permission = locationEnabled
+          ? await Permission.locationWhenInUse.request()
+          : PermissionStatus.denied;
+      final locationResult = locationEnabled && permission.isGranted
           ? await const LocationCapture().capture()
           : const LocationCaptureResult.failure(
               LocationFailureReason.permissionDenied,
@@ -1167,6 +742,20 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               '${emergencyType.label} will broadcast on mesh submission'
               '${adminForwardingConfigured ? '\nAdmin forwarding pending…' : '\nMesh-only: configure admin forwarding to relay online'}';
         });
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => EmergencyActiveScreen(
+              locationStatus: locationResult.status,
+              meshActive: _eventModeActive,
+            ),
+          ),
+        );
+        if (mounted) {
+          setState(() {
+            _selectedEmergencyType = SosEmergencyType.general;
+            _sosDescription = '';
+          });
+        }
       }
     } catch (error) {
       if (mounted) {
@@ -1185,6 +774,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         builder: (_) => OnboardingScreen(initialProfile: profile),
       ),
     );
+  }
+
+  Future<void> _openProfile() async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const ProfileScreen()));
   }
 
   Future<void> _confirmAndSendCealSos() async {
@@ -1330,11 +925,29 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _createEventAndRoom() async {
+    // A site/event already exists: "create a room" should add a room to
+    // it (RoomsScreen -> "Create another room"), not spin up a brand new
+    // event. JoinRepository keys one row per siteId and activeManifest()
+    // only ever surfaces the most recently joined/created site, so every
+    // call to createLocalEvent() here was silently hiding all previously
+    // created rooms behind a fresh, unrelated site.
+    final existingSite = await ref.read(joinRepositoryProvider).activeManifest();
+    if (!mounted) return;
+    if (existingSite != null) {
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
+          createRoomOnly: true,
           onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
+            // Route through the room lobby (QR + room/event codes) instead
+            // of straight into chat: the creator needs to show the QR code
+            // to other people before anyone can join.
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(
                 builder: (_) => RoomsScreen(initialRoomId: roomId),
@@ -1352,12 +965,30 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         builder: (context) => JoinScreen(
           onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => RoomsScreen(initialRoomId: roomId),
-              ),
-            );
+            unawaited(_openJoinedRoom(context, roomId));
           },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openJoinedRoom(BuildContext context, String? roomId) async {
+    final manifest = await ref.read(joinRepositoryProvider).activeManifest();
+    if (!context.mounted || manifest == null || manifest.rooms.isEmpty) return;
+    var room = manifest.rooms.first;
+    for (final candidate in manifest.rooms) {
+      if (candidate.roomId == roomId) {
+        room = candidate;
+        break;
+      }
+    }
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => RoomChatScreen(
+          siteId: manifest.siteId,
+          roomId: room.roomId,
+          roomName: room.name,
+          role: room.role,
         ),
       ),
     );
@@ -1478,6 +1109,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final result = await engine.transcribe(pcm);
       if (!mounted) return;
       setState(() {
+        if (result.text.trim().isNotEmpty) {
+          _sosDescription = result.text.trim();
+        }
         _sttStatus =
             'STT ok · "${result.text}" · '
             'conf ${result.confidence.toStringAsFixed(2)} · '
@@ -1496,372 +1130,137 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     ref.listen(gatewayEnabledProvider, (_, _) => _applyGatewaySettings());
     ref.listen(gatewayUrlProvider, (_, _) => _applyGatewaySettings());
     ref.listen(gatewayDemoKeyProvider, (_, _) => _applyGatewaySettings());
-    final activeSiteId =
-        ref.watch(activeSiteProvider).valueOrNull?.siteId ??
-        MeshEventController.demoSiteId;
-    final meshConfiguration = MeshSiteConfiguration.forSite(activeSiteId);
-    final localFingerprint = MeshGatt.siteFingerprint(
-      meshConfiguration.siteId,
-      namespace: meshConfiguration.namespace,
-    );
-    final fingerprintLabel = localFingerprint
-        .toUnsigned(64)
-        .toRadixString(16)
-        .padLeft(16, '0');
-    final fingerprintMismatchCount =
-        _scanStats['scan_fingerprint_mismatches'] ?? 0;
-    return Scaffold(
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(_status, style: Theme.of(context).textTheme.headlineSmall),
-              if (_receivedSosReporter != null)
-                Card(
-                  color: Colors.red.shade50,
-                  child: ListTile(
-                    leading: const Icon(Icons.sos, color: Colors.red),
-                    title: Text('Identity SOS · $_receivedSosReporter'),
-                    subtitle: Text(
-                      '${_receivedSosLocation ?? 'Location unavailable'}\n'
-                      '${_receivedSosContact ?? 'Emergency contact unavailable'}\n'
-                      'Hop ${_receivedSosHopCount ?? '—'} of '
-                      '${_receivedSosHopLimit ?? '—'} · via '
-                      '${_receivedSosPeer ?? 'unknown peer'}',
-                    ),
-                    isThreeLine: true,
-                    onTap:
-                        _receivedSosEventId == null ||
-                            _receivedSosObjectId == null ||
-                            _receivedSosSiteId == null
-                        ? null
-                        : () => Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => IncidentDetailScreen(
-                                siteId: _receivedSosSiteId!,
-                                eventId: _receivedSosEventId!,
-                                objectId: _receivedSosObjectId!,
-                              ),
-                            ),
-                          ),
-                  ),
-                ),
-              StreamBuilder<List<InboxEvent>>(
-                stream: ref.read(databaseProvider).watchInboxSite(activeSiteId),
-                builder: (context, snapshot) {
-                  InboxEvent? roomMessage;
-                  String? decodedText;
-                  for (final row in snapshot.data ?? const <InboxEvent>[]) {
-                    if (row.payloadType != PayloadType.roomMessage.name) {
-                      continue;
-                    }
-                    try {
-                      final content = RoomMessagePacketCodec.decode(
-                        siteId: row.siteId,
-                        roomId: row.roomId,
-                        eventId: row.eventId,
-                        packet: row.payload,
-                      );
-                      decodedText = content.text;
-                      roomMessage = row;
-                    } catch (_) {
-                      // Tampered or incomplete room packets stay hidden.
-                    }
-                  }
-                  if (roomMessage == null || decodedText == null) {
-                    return const SizedBox.shrink();
-                  }
-                  return Card(
-                    color: Colors.blue.shade50,
-                    child: ListTile(
-                      leading: const Icon(
-                        Icons.mark_chat_unread,
-                        color: Colors.blue,
-                      ),
-                      title: Text(
-                        'Room message received · ${roomMessage.roomId}',
-                      ),
-                      subtitle: Text(
-                        '$decodedText\nFrom: ${roomMessage.peerId}',
-                      ),
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: _eventModeActive ? null : _startEventMode,
-                child: const Text('Start event mode'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: _eventModeActive ? _stopEventMode : null,
-                child: const Text('Stop event mode'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _eventModeActive && !_sosPacketSending
-                    ? _chooseAndSendSosPacket
-                    : null,
-                icon: const Icon(Icons.sos),
-                style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                label: Text(
-                  _sosPacketSending ? 'Queuing SOS packet…' : 'Send SOS packet',
-                ),
-              ),
-              const SizedBox(height: 12),
-              Card(
-                color: _gestureServiceEnabled ? Colors.green.shade50 : null,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Background typed SOS gestures',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 4),
-                      const Text(
-                        '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence. '
-                        'These use the red typed SOS pipeline only—not the CEAL identity SOS.',
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _gestureServiceEnabled
-                            ? 'Enabled. Works after the app UI closes while Event Mode is active.'
-                            : 'Disabled. Enable the MeshSetu accessibility service to use gestures.',
-                        style: TextStyle(
-                          color: _gestureServiceEnabled
-                              ? Colors.green.shade800
-                              : Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                        onPressed: _openGestureSettings,
-                        icon: const Icon(Icons.settings_accessibility),
-                        label: Text(
-                          _gestureServiceEnabled
-                              ? 'Review gesture permission'
-                              : 'Enable emergency gestures',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _eventModeActive ? _confirmAndSendCealSos : null,
-                icon: const Icon(Icons.cell_tower),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.deepOrange,
-                ),
-                label: const Text('Send CEAL-style SOS'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: _editProfile,
-                icon: const Icon(Icons.badge_outlined),
-                label: const Text('Edit emergency profile'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: _eventModeActive ? _sendTestSos : null,
-                child: const Text('Send BLE SOS notification test'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _eventModeActive ? _openSos : null,
-                icon: const Icon(Icons.sos),
-                style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                label: const Text('Send real voice + GPS SOS'),
-              ),
-              const SizedBox(height: 12),
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: const Text('Admin server forwarding'),
-                subtitle: const Text(
-                  'Send this phone\'s SOS directly to the control room',
-                ),
-                children: [
-                  TextField(
-                    controller: _adminServerController,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      labelText: 'Admin server URL',
-                      hintText: 'http://192.168.1.42:8000',
-                      border: OutlineInputBorder(),
-                    ),
-                    onChanged: (value) =>
-                        ref.read(gatewayUrlProvider.notifier).state = value
-                            .trim(),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _gatewayKeyController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Admin server key',
-                      helperText:
-                          'Used only for admin forwarding; it does not change '
-                          'Bluetooth or mesh encryption.',
-                      border: OutlineInputBorder(),
-                    ),
-                    onChanged: (value) =>
-                        ref.read(gatewayDemoKeyProvider.notifier).state = value,
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Forward SOS to admin server'),
-                    value: ref.watch(gatewayEnabledProvider),
-                    onChanged: (value) =>
-                        ref.read(gatewayEnabledProvider.notifier).state = value,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton(
-                onPressed: (_eventModeActive && !_sttTesting)
-                    ? _runSttSmokeTest
-                    : null,
-                child: Text(
-                  _sttTesting ? 'Running STT test...' : 'Run STT smoke test',
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text('STT smoke test: $_sttStatus'),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _eventModeActive ? _createEventAndRoom : null,
-                icon: const Icon(Icons.add_home_work_outlined),
-                style: FilledButton.styleFrom(backgroundColor: Colors.teal),
-                label: const Text('Create Room (Share QR)'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _eventModeActive ? _joinRoomScanQr : null,
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Join Room (Scan QR)'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton(
-                onPressed: _eventModeActive ? _openJoinOrRooms : null,
-                child: const Text('Rooms / Chat / SOS'),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Debug: drop/corrupt test frames'),
-                value: _debugLossEnabled,
-                onChanged: _eventModeActive
-                    ? (enabled) {
-                        setState(() => _debugLossEnabled = enabled);
-                        FlutterForegroundTask.sendDataToTask({
-                          'debugLoss': enabled,
-                        });
-                      }
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              Text('Mesh: $_meshStatus · ready peers: ${_peerDebug.length}'),
-              Text('Advertising: $_advertisingStatus'),
-              Card(
-                color: fingerprintMismatchCount > 0
-                    ? Colors.amber.shade50
-                    : null,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Mesh identity',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      Text('Site ID: ${meshConfiguration.siteId}'),
-                      Text('Namespace: ${meshConfiguration.namespace}'),
-                      Text('Fingerprint: $fingerprintLabel'),
-                      if (fingerprintMismatchCount > 0)
-                        Text(
-                          'WARNING: $fingerprintMismatchCount nearby device(s) '
-                          'have a different site fingerprint.',
-                          style: TextStyle(color: Colors.amber.shade900),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              const Text(
-                'Discovery funnel',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              Text(
-                'Seen ${_scanStats['scan_devices_seen'] ?? 0} · '
-                'service ${_scanStats['scan_service_matches'] ?? 0} · '
-                'metadata ${_scanStats['scan_manufacturer_matches'] ?? 0} · '
-                'UUID-only ${_scanStats['scan_uuid_only_candidates'] ?? 0} · '
-                'accepted ${_scanStats['scan_peers_accepted'] ?? 0}',
-              ),
-              Text(
-                'Malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
-                'fingerprint rejected $fingerprintMismatchCount · '
-                'duty ${_scanStats['scan_duty_cycle'] ?? 0}%',
-              ),
-              Text('Nearest beacon: $_nearestBeacon'),
-              Text('Zone: $_zone'),
-              Text('Last metric: $_lastMetric'),
-              Text('Latest link event: $_lastConnection'),
-              Text('Last object: $_lastReceived'),
-              if (_peerDebug.isEmpty && _eventModeActive)
-                const Text('No ready GATT peers yet.'),
-              if (_peerDebug.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                for (final peer in _peerDebug)
-                  Text(
-                    'Peer ${peer['peerId']}: '
-                    '${peer['connected'] == true ? 'connected' : 'disconnected'}, '
-                    'MTU ${peer['mtu'] ?? '?'}, '
-                    'RSSI ${peer['rssi'] ?? '?'}, '
-                    'relay backlog ${peer['queuedObjects'] ?? '?'}',
-                  ),
-              ],
-            ],
-          ),
-        ),
-      ),
+    return EmergencyHomeScreen(
+      eventModeActive: _eventModeActive,
+      sending: _sosPacketSending || _sttTesting,
+      emergencyType: _selectedEmergencyType,
+      description: _sosDescription,
+      holdSeconds: ref.watch(sosTimeoutProvider).round(),
+      onSos: () => unawaited(_sendSosPacket(_selectedEmergencyType)),
+      onProfile: () => unawaited(_openProfile()),
+      onEmergencyType: () => unawaited(_chooseEmergencyType()),
+      onVoice: () => unawaited(_runSttSmokeTest()),
+      onDescribe: () => unawaited(_describeSos()),
+      onCreateRoom: () => unawaited(_createEventAndRoom()),
+      onJoinRoom: () => unawaited(_joinRoomScanQr()),
     );
   }
+}
+
+/// Owns its own [TextEditingController] lifecycle so Flutter disposes it
+/// when this sheet's element unmounts, rather than the caller disposing it
+/// immediately after popping (which can race with the sheet's closing
+/// animation and trip the 'framework.dart' `_dependents.isEmpty` assertion).
+class _DescribeSosSheet extends StatefulWidget {
+  const _DescribeSosSheet({required this.initialText});
+
+  final String initialText;
+
+  @override
+  State<_DescribeSosSheet> createState() => _DescribeSosSheetState();
+}
+
+class _DescribeSosSheetState extends State<_DescribeSosSheet> {
+  late final _controller = TextEditingController(text: widget.initialText);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        8,
+        20,
+        MediaQuery.viewInsetsOf(context).bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Describe the emergency',
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Add what happened, where you are, and any immediate danger.',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _controller,
+            autofocus: true,
+            minLines: 4,
+            maxLines: 7,
+            maxLength: 500,
+            decoration: const InputDecoration(
+              hintText: 'Type emergency details',
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_controller.text.trim()),
+            child: const Text('Save details'),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _SosTypeSelectionScreen extends StatelessWidget {
   const _SosTypeSelectionScreen();
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Choose emergency type')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        const Text(
-          'This will be sent as a P0 SOS and encoded in the compact BLE flags.',
-        ),
-        const SizedBox(height: 16),
-        for (final type in SosEmergencyType.values)
-          Card(
-            child: ListTile(
-              leading: Icon(_iconFor(type), color: Colors.red),
-              title: Text(type.label),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).pop(type),
-            ),
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return MeshPage(
+      title: 'Emergency Type',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Choose the type that best describes the emergency. You can still send a general SOS.',
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
-      ],
-    ),
-  );
+          const SizedBox(height: MeshSpace.lg),
+          for (final type in SosEmergencyType.values) ...[
+            MeshCard(
+              onTap: () => Navigator.of(context).pop(type),
+              child: Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: palette.ember.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(_iconFor(type), color: palette.ember),
+                  ),
+                  const SizedBox(width: MeshSpace.md),
+                  Expanded(
+                    child: Text(
+                      type.label,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right),
+                ],
+              ),
+            ),
+            const SizedBox(height: MeshSpace.sm),
+          ],
+        ],
+      ),
+    );
+  }
 
   IconData _iconFor(SosEmergencyType type) => switch (type) {
     SosEmergencyType.general => Icons.sos,
@@ -1905,7 +1304,10 @@ class _SosCountdownDialogState extends State<_SosCountdownDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    icon: const Icon(Icons.warning_amber_rounded, color: Colors.red),
+    icon: Icon(
+      Icons.warning_amber_rounded,
+      color: MeshPalette.of(context).ember,
+    ),
     title: const Text('Send emergency SOS?'),
     content: Text(
       'Your identity-bound SOS packet will send in $_secondsRemaining '

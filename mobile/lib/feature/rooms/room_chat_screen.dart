@@ -2,13 +2,18 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/active_room_reporter.dart';
-import '../../app/event_mode_screen.dart' show meshEventTaskCallback;
+import '../../app/mesh_event_task.dart' show meshEventTaskCallback;
 import '../../app/mesh_bridge_client.dart' show MeshStatus;
 import '../../app/providers.dart';
 import '../../app/room_mesh_bootstrap.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
+import '../location/location_capture.dart';
 import 'room_message_dispatcher.dart';
+import 'room_lobby_screen.dart';
 import 'room_policy.dart';
 import 'room_presence_socket.dart';
 import 'room_repository.dart';
@@ -155,6 +160,55 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     }
   }
 
+  Future<void> _sendStructured(String type, String content) async {
+    _textController.text = '[[$type]]$content';
+    await _send();
+  }
+
+  Future<void> _shareLocation() async {
+    final permission = await Permission.locationWhenInUse.request();
+    if (!permission.isGranted) {
+      setState(
+        () => _error = 'Location permission is needed to share your position.',
+      );
+      return;
+    }
+    final result = await const LocationCapture().capture();
+    final location = result.location;
+    if (location == null) {
+      setState(() => _error = result.status);
+      return;
+    }
+    await _sendStructured(
+      'location',
+      '${location.latitude.toStringAsFixed(5)},${location.longitude.toStringAsFixed(5)},${location.accuracyM?.round() ?? 'unknown'}',
+    );
+  }
+
+  Future<void> _shareProfile() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (profile == null) {
+      setState(() => _error = 'Complete your profile before sharing it.');
+      return;
+    }
+    await _sendStructured('profile', '${profile.name}|${profile.phone}');
+  }
+
+  Future<void> _shareMedical() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (profile == null) {
+      setState(
+        () => _error = 'Complete your medical profile before sharing it.',
+      );
+      return;
+    }
+    final medical = profile.medicalProfile;
+    await _sendStructured(
+      'medical',
+      '${medical.bloodGroup}|${medical.allergies}|${medical.conditions}',
+    );
+  }
+
   Future<void> _startEventModeFromRoom() async {
     if (_startingEventMode) return;
     setState(() => _startingEventMode = true);
@@ -171,6 +225,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
 
   @override
   Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
     final userRoles = ref.watch(userRolesProvider);
     final policy = policyForRole(widget.roomId, widget.role);
     if (!canRead(policy, userRoles)) {
@@ -190,8 +245,40 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
       )),
     );
     final meshStatus = ref.watch(meshStatusProvider);
+    final manifest = ref.watch(activeSiteProvider).valueOrNull;
+    final matchingRoom = manifest?.rooms
+        .where((room) => room.roomId == widget.roomId)
+        .toList();
     return Scaffold(
-      appBar: AppBar(title: Text(widget.roomName)),
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.roomName),
+            Text(
+              'Emergency room · ${widget.role}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: [
+          if (manifest != null &&
+              matchingRoom != null &&
+              matchingRoom.isNotEmpty)
+            IconButton(
+              tooltip: 'Share room invite',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => RoomLobbyScreen(
+                    manifest: manifest,
+                    room: matchingRoom.first,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.ios_share_outlined),
+            ),
+        ],
+      ),
       body: Column(
         children: [
           meshStatus.when(
@@ -203,6 +290,34 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
           ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(
+              MeshSpace.md,
+              MeshSpace.sm,
+              MeshSpace.md,
+              MeshSpace.xs,
+            ),
+            child: Row(
+              children: [
+                _QuickAction(
+                  icon: Icons.location_on_outlined,
+                  label: 'Location',
+                  onTap: _shareLocation,
+                ),
+                _QuickAction(
+                  icon: Icons.person_outline,
+                  label: 'Profile',
+                  onTap: _shareProfile,
+                ),
+                _QuickAction(
+                  icon: Icons.medical_information_outlined,
+                  label: 'Medical',
+                  onTap: _shareMedical,
+                ),
+              ],
+            ),
+          ),
           Expanded(
             child: messages.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -210,8 +325,16 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
               data: (items) {
                 final visible = items.toList()
                   ..sort((a, b) => a.atMs.compareTo(b.atMs));
+                if (visible.isEmpty) {
+                  return const MeshEmptyState(
+                    icon: Icons.forum_outlined,
+                    title: 'No messages yet',
+                    message: 'Send the first message to this room.',
+                  );
+                }
                 return ListView.builder(
                   reverse: true,
+                  padding: const EdgeInsets.symmetric(vertical: MeshSpace.sm),
                   itemCount: visible.length,
                   itemBuilder: (context, i) {
                     final m = visible[visible.length - 1 - i];
@@ -227,18 +350,12 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                             nowMs: DateTime.now().millisecondsSinceEpoch,
                           )
                         : null;
-                    return ListTile(
-                      dense: true,
-                      title: Text(m.text),
-                      subtitle: reason != null
-                          ? Text(
-                              reason,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            )
-                          : Text(m.mine ? 'you' : (m.fromPeerId ?? 'peer')),
-                      trailing: m.mine
-                          ? _DeliveryStateIcon(state: m.state)
-                          : null,
+                    return _MessageBubble(
+                      text: m.text,
+                      mine: m.mine,
+                      sender: m.mine ? 'You' : (m.fromPeerId ?? 'Peer'),
+                      reason: reason,
+                      deliveryState: m.mine ? m.state : null,
                     );
                   },
                 );
@@ -247,38 +364,253 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Text(
-              'Cloud: $_liveStatus',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.outline,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Cloud: $_liveStatus',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: palette.textMuted),
               ),
             ),
           ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _error!,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: palette.ember),
+                ),
+              ),
             ),
           Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _textController,
-                    maxLength: policy.maxMessageBytes,
-                    decoration: const InputDecoration(hintText: 'Message'),
-                    onSubmitted: (_) => _send(),
+            padding: const EdgeInsets.fromLTRB(
+              MeshSpace.sm,
+              MeshSpace.xs,
+              MeshSpace.sm,
+              MeshSpace.sm,
+            ),
+            child: SafeArea(
+              top: false,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _textController,
+                      maxLength: policy.maxMessageBytes,
+                      minLines: 1,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        hintText: 'Message',
+                        counterText: '',
+                      ),
+                      onSubmitted: (_) => _send(),
+                    ),
                   ),
-                ),
-                IconButton(icon: const Icon(Icons.send), onPressed: _send),
-              ],
+                  const SizedBox(width: MeshSpace.sm),
+                  IconButton.filled(
+                    tooltip: 'Send message',
+                    icon: const Icon(Icons.send_rounded),
+                    onPressed: _send,
+                  ),
+                ],
+              ),
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _QuickAction extends StatelessWidget {
+  const _QuickAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(right: MeshSpace.sm),
+    child: ActionChip(
+      avatar: Icon(icon, size: 18, color: MeshPalette.of(context).primary),
+      label: Text(label),
+      onPressed: onTap,
+    ),
+  );
+}
+
+class _MessageBubble extends StatelessWidget {
+  const _MessageBubble({
+    required this.text,
+    required this.mine,
+    required this.sender,
+    required this.reason,
+    required this.deliveryState,
+  });
+
+  final String text;
+  final bool mine;
+  final String sender;
+  final String? reason;
+  final RoomMessageState? deliveryState;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    final structured = _StructuredMessage.tryParse(text);
+    final foreground = mine
+        ? palette.onPrimary
+        : Theme.of(context).colorScheme.onSurface;
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 330),
+        margin: const EdgeInsets.symmetric(
+          horizontal: MeshSpace.md,
+          vertical: MeshSpace.xs,
+        ),
+        padding: const EdgeInsets.all(MeshSpace.md),
+        decoration: BoxDecoration(
+          color: mine
+              ? palette.primary
+              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(MeshRadius.md),
+            topRight: const Radius.circular(MeshRadius.md),
+            bottomLeft: Radius.circular(mine ? MeshRadius.md : MeshSpace.xs),
+            bottomRight: Radius.circular(mine ? MeshSpace.xs : MeshRadius.md),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (structured == null)
+              Text(text, style: TextStyle(color: foreground))
+            else
+              _StructuredMessageCard(
+                message: structured,
+                foreground: foreground,
+              ),
+            const SizedBox(height: MeshSpace.xs),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    reason ?? sender,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: foreground.withValues(alpha: .72),
+                    ),
+                  ),
+                ),
+                if (deliveryState != null) ...[
+                  const SizedBox(width: MeshSpace.sm),
+                  _DeliveryStateIcon(state: deliveryState!),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StructuredMessage {
+  const _StructuredMessage(this.type, this.values);
+
+  final String type;
+  final List<String> values;
+
+  static _StructuredMessage? tryParse(String value) {
+    final match = RegExp(
+      r'^\[\[(location|profile|medical)\]\](.*)$',
+    ).firstMatch(value);
+    if (match == null) return null;
+    final type = match.group(1)!;
+    final separator = type == 'location' ? ',' : '|';
+    return _StructuredMessage(type, match.group(2)!.split(separator));
+  }
+}
+
+class _StructuredMessageCard extends StatelessWidget {
+  const _StructuredMessageCard({
+    required this.message,
+    required this.foreground,
+  });
+
+  final _StructuredMessage message;
+  final Color foreground;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, title, lines) = switch (message.type) {
+      'location' => (
+        Icons.location_on_outlined,
+        'Shared location',
+        [
+          if (message.values.length >= 2)
+            '${message.values[0]}, ${message.values[1]}',
+          if (message.values.length >= 3) 'Accuracy ±${message.values[2]} m',
+        ],
+      ),
+      'profile' => (
+        Icons.person_outline,
+        'Profile information',
+        message.values,
+      ),
+      _ => (
+        Icons.medical_information_outlined,
+        'Medical information',
+        [
+          if (message.values.isNotEmpty)
+            'Blood type: ${_value(message.values[0])}',
+          if (message.values.length >= 2)
+            'Allergies: ${_value(message.values[1])}',
+          if (message.values.length >= 3)
+            'Conditions: ${_value(message.values[2])}',
+        ],
+      ),
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 20, color: foreground),
+            const SizedBox(width: MeshSpace.sm),
+            Expanded(
+              child: Text(
+                title,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(color: foreground),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: MeshSpace.sm),
+        for (final line in lines)
+          Text(line, style: TextStyle(color: foreground)),
+      ],
+    );
+  }
+
+  static String _value(String value) =>
+      value.trim().isEmpty ? 'Not provided' : value.trim();
 }
 
 /// Mesh-first status strip shown above the message list, primary over the
@@ -296,6 +628,7 @@ class _MeshStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
     if (!status.eventModeRunning) {
       final blockedReason = status.blockedReason;
       return Material(
@@ -304,7 +637,11 @@ class _MeshStatusBar extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
             children: [
-              const Icon(Icons.bluetooth_disabled, size: 18),
+              Icon(
+                Icons.bluetooth_disabled,
+                size: 18,
+                color: palette.textMuted,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -343,6 +680,7 @@ class _MeshStatusBar extends StatelessWidget {
                       ? Icons.bluetooth_connected
                       : Icons.bluetooth_searching,
                   size: 16,
+                  color: peerCount > 0 ? palette.live : palette.mesh,
                 ),
                 const SizedBox(width: 8),
                 Text(
@@ -358,7 +696,11 @@ class _MeshStatusBar extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: Row(
                   children: [
-                    const Icon(Icons.warning_amber, size: 14),
+                    Icon(
+                      Icons.warning_amber,
+                      size: 14,
+                      color: palette.caution,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -383,26 +725,29 @@ class _DeliveryStateIcon extends StatelessWidget {
   final RoomMessageState state;
 
   @override
-  Widget build(BuildContext context) => switch (state) {
-    RoomMessageState.queued => const Icon(
-      Icons.schedule,
-      size: 16,
-      color: Colors.grey,
-    ),
-    RoomMessageState.sending => const SizedBox(
-      width: 14,
-      height: 14,
-      child: CircularProgressIndicator(strokeWidth: 2),
-    ),
-    RoomMessageState.delivered => const Icon(
-      Icons.check_circle,
-      size: 16,
-      color: Colors.green,
-    ),
-    RoomMessageState.failed => const Icon(
-      Icons.error_outline,
-      size: 16,
-      color: Colors.red,
-    ),
-  };
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return switch (state) {
+      RoomMessageState.queued => Icon(
+        Icons.schedule,
+        size: 16,
+        color: palette.textMuted,
+      ),
+      RoomMessageState.sending => const SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      RoomMessageState.delivered => Icon(
+        Icons.check_circle,
+        size: 16,
+        color: palette.live,
+      ),
+      RoomMessageState.failed => Icon(
+        Icons.error_outline,
+        size: 16,
+        color: palette.ember,
+      ),
+    };
+  }
 }

@@ -2,10 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
-import '../gateway/gateway_screen.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import '../join/manifest.dart';
-import '../sos/sos_screen.dart';
-import '../voice/voice_inbox_screen.dart';
 import 'room_lobby_screen.dart';
 import 'room_policy.dart';
 
@@ -20,7 +19,10 @@ String _roomIdFromName(String name) {
 }
 
 /// Room list for the joined site (Bible §20.5: "Join -> Rooms -> SOS flow
-/// is understandable in under 30 seconds").
+/// is understandable in under 30 seconds"). As of Task 3, Send SOS, Voice
+/// Evidence, and Gateway have their own tabs/named routes, so this screen
+/// is scoped to room-list content only rather than acting as a general
+/// navigation hub.
 class RoomsScreen extends ConsumerStatefulWidget {
   const RoomsScreen({super.key, this.initialRoomId});
 
@@ -37,107 +39,147 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
   Widget build(BuildContext context) {
     final site = ref.watch(activeSiteProvider);
     final userRoles = ref.watch(userRolesProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Rooms')),
-      body: site.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(child: Text('Failed to load site: $e')),
-        data: (manifest) {
-          if (manifest == null) {
-            return const Center(child: Text('Join an event first.'));
-          }
-          final readableRooms = manifest.rooms
-              .where(
-                (room) =>
-                    canRead(policyForRole(room.roomId, room.role), userRoles),
-              )
-              .toList();
-          final initialRoomId = widget.initialRoomId;
-          final matchingRooms = initialRoomId == null
-              ? const <RoomManifest>[]
-              : readableRooms
-                    .where((room) => room.roomId == initialRoomId)
+    return MeshScaffold(
+      title: 'Rooms',
+      subtitle: 'Coordinate securely with people nearby',
+      actions: [
+        IconButton(
+          tooltip: 'Create another room',
+          onPressed: () => _createRoom(context, ref),
+          icon: const Icon(Icons.add_circle_outline),
+        ),
+      ],
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: MeshSpace.screen),
+            child: site.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: MeshSpace.xxl),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (e, _) => MeshEmptyState(
+                icon: Icons.error_outline,
+                title: 'Could not load your site',
+                message: '$e',
+              ),
+              data: (manifest) {
+                if (manifest == null) {
+                  return const MeshEmptyState(
+                    icon: Icons.explore_outlined,
+                    title: 'Join an event first',
+                    message:
+                        'Scan a QR code or enter a mesh code from the '
+                        'onboarding flow to see rooms here.',
+                  );
+                }
+                final readableRooms = manifest.rooms
+                    .where(
+                      (room) => canRead(
+                        policyForRole(room.roomId, room.role),
+                        userRoles,
+                      ),
+                    )
                     .toList();
-          final initialRoom = matchingRooms.isEmpty
-              ? null
-              : matchingRooms.first;
-          if (!_openedInitialRoom && initialRoom != null) {
-            _openedInitialRoom = true;
-            WidgetsBinding.instance.addPostFrameCallback(
-              (_) => _openLobby(context, manifest, initialRoom),
-            );
-          }
-          return ListView(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: FilledButton.icon(
-                  icon: const Icon(Icons.add_home_work_outlined),
-                  label: const Text('Create another room'),
-                  onPressed: () => _createRoom(context, ref),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                child: Text(
-                  'Open a room lobby to share its QR, room code, and see who has joined.',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.sos, color: Colors.red),
-                title: const Text('Send SOS'),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => SosScreen(
-                      siteId: manifest.siteId,
-                      roomId: manifest.rooms.isEmpty
-                          ? 'public'
-                          : manifest.rooms.first.roomId,
+                final initialRoomId = widget.initialRoomId;
+                final matchingRooms = initialRoomId == null
+                    ? const <RoomManifest>[]
+                    : readableRooms
+                          .where((room) => room.roomId == initialRoomId)
+                          .toList();
+                final initialRoom = matchingRooms.isEmpty
+                    ? null
+                    : matchingRooms.first;
+                if (!_openedInitialRoom && initialRoom != null) {
+                  _openedInitialRoom = true;
+                  WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => _openLobby(context, manifest, initialRoom),
+                  );
+                }
+                if (readableRooms.isEmpty) {
+                  return MeshEmptyState(
+                    icon: Icons.forum_outlined,
+                    title: 'No rooms yet',
+                    message:
+                        'Create the first room so people nearby can '
+                        'coordinate securely.',
+                    action: FilledButton.icon(
+                      onPressed: () => _createRoom(context, ref),
+                      icon: const Icon(Icons.add_circle_outline),
+                      label: const Text('Create a room'),
                     ),
-                  ),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.graphic_eq),
-                title: const Text('Voice evidence'),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => VoiceInboxScreen(siteId: manifest.siteId),
-                  ),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.router_outlined),
-                title: const Text('Gateway'),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const GatewayScreen()),
-                ),
-              ),
-              const Divider(),
-              for (final room in readableRooms)
-                ListTile(
-                  leading: const Icon(Icons.forum_outlined),
-                  title: Text(room.name),
-                  subtitle: Text(room.role),
-                  trailing: IconButton(
-                    tooltip: 'Open room lobby',
-                    icon: const Icon(Icons.meeting_room_outlined),
-                    onPressed: () => _openLobby(context, manifest, room),
-                  ),
-                  onTap: () => _openLobby(context, manifest, room),
-                ),
-            ],
-          );
-        },
-      ),
+                  );
+                }
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final room in readableRooms) ...[
+                      MeshCard(
+                        onTap: () => _openLobby(context, manifest, room),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 44,
+                              height: 44,
+                              decoration: BoxDecoration(
+                                color: MeshPalette.of(
+                                  context,
+                                ).primary.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                Icons.forum_outlined,
+                                color: MeshPalette.of(context).primary,
+                              ),
+                            ),
+                            const SizedBox(width: MeshSpace.md),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    room.name,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleMedium,
+                                  ),
+                                  Text(
+                                    room.role,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Open room lobby',
+                              icon: const Icon(Icons.meeting_room_outlined),
+                              onPressed: () =>
+                                  _openLobby(context, manifest, room),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: MeshSpace.sm),
+                    ],
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ],
     );
   }
 
   Future<void> _createRoom(BuildContext context, WidgetRef ref) async {
-    final room = await showDialog<RoomManifest>(
+    final room = await showModalBottomSheet<RoomManifest>(
       context: context,
-      builder: (_) => const _CreateRoomDialog(),
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => const _CreateRoomSheet(),
     );
     if (room == null || !context.mounted) return;
     try {
@@ -168,14 +210,14 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
   }
 }
 
-class _CreateRoomDialog extends StatefulWidget {
-  const _CreateRoomDialog();
+class _CreateRoomSheet extends StatefulWidget {
+  const _CreateRoomSheet();
 
   @override
-  State<_CreateRoomDialog> createState() => _CreateRoomDialogState();
+  State<_CreateRoomSheet> createState() => _CreateRoomSheetState();
 }
 
-class _CreateRoomDialogState extends State<_CreateRoomDialog> {
+class _CreateRoomSheetState extends State<_CreateRoomSheet> {
   final _nameController = TextEditingController();
   var _role = 'public';
 
@@ -185,56 +227,61 @@ class _CreateRoomDialogState extends State<_CreateRoomDialog> {
     super.dispose();
   }
 
+  void _submit() {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) return;
+    Navigator.of(context).pop(
+      RoomManifest(
+        roomId: _roomIdFromName(name),
+        name: name,
+        role: _role,
+        ttlSeconds: 3600,
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Create room'),
-    content: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        TextField(
-          controller: _nameController,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Room name',
-            hintText: 'e.g. Registration Desk',
-          ),
-        ),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<String>(
-          initialValue: _role,
-          decoration: const InputDecoration(labelText: 'Room access'),
-          items: const [
-            DropdownMenuItem(value: 'public', child: Text('Public')),
-            DropdownMenuItem(value: 'volunteer', child: Text('Volunteer')),
-            DropdownMenuItem(value: 'medical', child: Text('Medical')),
-            DropdownMenuItem(value: 'responder', child: Text('Responder')),
-          ],
-          onChanged: (value) {
-            if (value != null) setState(() => _role = value);
-          },
-        ),
-      ],
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.of(context).pop(),
-        child: const Text('Cancel'),
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(
+        MeshSpace.screen,
+        MeshSpace.sm,
+        MeshSpace.screen,
+        MediaQuery.viewInsetsOf(context).bottom + MeshSpace.lg,
       ),
-      FilledButton(
-        onPressed: () {
-          final name = _nameController.text.trim();
-          if (name.isEmpty) return;
-          Navigator.of(context).pop(
-            RoomManifest(
-              roomId: _roomIdFromName(name),
-              name: name,
-              role: _role,
-              ttlSeconds: 3600,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Create room', style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: MeshSpace.md),
+          TextField(
+            controller: _nameController,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Room name',
+              hintText: 'e.g. Registration Desk',
             ),
-          );
-        },
-        child: const Text('Create'),
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: MeshSpace.md),
+          DropdownButtonFormField<String>(
+            initialValue: _role,
+            decoration: const InputDecoration(labelText: 'Room access'),
+            items: const [
+              DropdownMenuItem(value: 'public', child: Text('Public')),
+              DropdownMenuItem(value: 'volunteer', child: Text('Volunteer')),
+              DropdownMenuItem(value: 'medical', child: Text('Medical')),
+              DropdownMenuItem(value: 'responder', child: Text('Responder')),
+            ],
+            onChanged: (value) {
+              if (value != null) setState(() => _role = value);
+            },
+          ),
+          const SizedBox(height: MeshSpace.lg),
+          MeshFullWidthButton(label: 'Create', onPressed: _submit),
+        ],
       ),
-    ],
+    ),
   );
 }

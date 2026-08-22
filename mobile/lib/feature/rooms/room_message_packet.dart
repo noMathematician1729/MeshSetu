@@ -92,8 +92,14 @@ abstract final class RoomMessagePacketCodec {
     headerAndBody.setRange(0, _magic.length, _magic);
     headerAndBody[4] = _version;
     headerAndBody[5] = nameBytes.length;
-    ByteData.sublistView(headerAndBody).setUint16(6, textBytes.length, Endian.big);
-    headerAndBody.setRange(_v2HeaderBytes, _v2HeaderBytes + nameBytes.length, nameBytes);
+    ByteData.sublistView(
+      headerAndBody,
+    ).setUint16(6, textBytes.length, Endian.big);
+    headerAndBody.setRange(
+      _v2HeaderBytes,
+      _v2HeaderBytes + nameBytes.length,
+      nameBytes,
+    );
     headerAndBody.setRange(
       _v2HeaderBytes + nameBytes.length,
       headerAndBody.length,

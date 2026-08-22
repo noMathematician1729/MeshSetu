@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
 import '../../core/data/database.dart';
 import '../../core/model/model.dart';
+import '../../ui/components/mesh_components.dart';
+import '../../ui/theme/mesh_tokens.dart';
 import '../voice/voice_repository.dart';
 import 'sos_payload.dart';
 
@@ -22,9 +24,10 @@ class IncidentDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final db = ref.watch(databaseProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('SOS incident')),
-      body: StreamBuilder<List<InboxEvent>>(
+    return MeshPage(
+      title: 'SOS Incident',
+      scrollable: false,
+      child: StreamBuilder<List<InboxEvent>>(
         stream: db.watchInboxSite(siteId),
         builder: (context, snapshot) {
           final rows = snapshot.data ?? const <InboxEvent>[];
@@ -37,8 +40,10 @@ class IncidentDetailScreen extends ConsumerWidget {
             }
           }
           if (incident == null) {
-            return const Center(
-              child: Text('Incident details are still syncing.'),
+            return const MeshEmptyState(
+              icon: Icons.sync_outlined,
+              title: 'Syncing',
+              message: 'Incident details are still syncing.',
             );
           }
           try {
@@ -55,62 +60,88 @@ class IncidentDetailScreen extends ConsumerWidget {
               }
             }
             return ListView(
-              padding: const EdgeInsets.all(16),
               children: [
+                const MeshStatusPill(
+                  label: 'Verified mesh incident',
+                  icon: Icons.verified_user_outlined,
+                  tone: MeshStatusTone.critical,
+                ),
+                const SizedBox(height: MeshSpace.md),
                 Text(
                   sos.incidentType,
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 Text('Priority: ${sos.triagePriority.name}'),
-                const SizedBox(height: 16),
-                _section('Reporter', sos.reporter?.name ?? 'Unknown'),
-                _section(
-                  'Contact',
-                  sos.reporter == null
-                      ? 'Unavailable'
-                      : '${sos.reporter!.primaryContactName} · ${sos.reporter!.primaryContactPhone}',
+                const SizedBox(height: MeshSpace.lg),
+                MeshCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      MeshDataRow(
+                        label: 'Reporter',
+                        value: sos.reporter?.name ?? 'Unknown',
+                        icon: Icons.person_outline,
+                      ),
+                      const Divider(height: MeshSpace.sm),
+                      MeshDataRow(
+                        label: 'Contact',
+                        value: sos.reporter == null
+                            ? 'Unavailable'
+                            : '${sos.reporter!.primaryContactName} · ${sos.reporter!.primaryContactPhone}',
+                        icon: Icons.contact_phone_outlined,
+                      ),
+                      const Divider(height: MeshSpace.sm),
+                      MeshDataRow(
+                        label: 'Location',
+                        value: sos.latitude == null || sos.longitude == null
+                            ? 'Unavailable'
+                            : '${sos.latitude!.toStringAsFixed(5)}, ${sos.longitude!.toStringAsFixed(5)}'
+                                  '${sos.accuracyM == null ? '' : ' · ±${sos.accuracyM!.round()} m'}',
+                        icon: Icons.location_on_outlined,
+                      ),
+                      const Divider(height: MeshSpace.sm),
+                      MeshDataRow(
+                        label: 'Route',
+                        value: '${incident.peerId} · ${incident.receivedAtMs}',
+                        icon: Icons.route_outlined,
+                      ),
+                      const Divider(height: MeshSpace.sm),
+                      MeshDataRow(
+                        label: 'Voice evidence',
+                        value: hasVoice
+                            ? 'Received — open Voice evidence to play.'
+                            : 'Pending or unavailable.',
+                        icon: Icons.graphic_eq_outlined,
+                      ),
+                    ],
+                  ),
                 ),
-                _section(
-                  'Transcript',
-                  sos.transcript.isEmpty ? 'Unavailable' : sos.transcript,
-                ),
-                _section(
-                  'Location',
-                  sos.latitude == null || sos.longitude == null
-                      ? 'Unavailable'
-                      : '${sos.latitude!.toStringAsFixed(5)}, ${sos.longitude!.toStringAsFixed(5)}'
-                            '${sos.accuracyM == null ? '' : ' · ±${sos.accuracyM!.round()} m'}',
-                ),
-                _section(
-                  'Route',
-                  '${incident.peerId} · ${incident.receivedAtMs}',
-                ),
-                _section(
-                  'Voice evidence',
-                  hasVoice
-                      ? 'Received — open Voice evidence to play.'
-                      : 'Pending or unavailable.',
+                const SizedBox(height: MeshSpace.md),
+                MeshCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const MeshMicroLabel('Transcript'),
+                      const SizedBox(height: MeshSpace.sm),
+                      Text(
+                        sos.transcript.isEmpty
+                            ? 'Unavailable'
+                            : sos.transcript,
+                      ),
+                    ],
+                  ),
                 ),
               ],
             );
           } catch (_) {
-            return const Center(
-              child: Text('Incident payload could not be decoded.'),
+            return const MeshEmptyState(
+              icon: Icons.error_outline,
+              title: 'Could not decode incident',
+              message: 'The incident payload could not be decoded.',
             );
           }
         },
       ),
     );
   }
-
-  Widget _section(String label, String value) => Padding(
-    padding: const EdgeInsets.only(bottom: 16),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-        Text(value),
-      ],
-    ),
-  );
 }
