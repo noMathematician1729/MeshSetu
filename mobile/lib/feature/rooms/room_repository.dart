@@ -112,17 +112,18 @@ class RoomRepository {
   RoomRepository(
     this._db, {
     required this.siteId,
+
     /// Optional async resolver for the local user's display name. When
     /// provided it is called once per [sendMessage] and the result is encoded
     /// into the v2 packet so recipients can show a real sender name.
     /// A missing or null result is silently accepted — the packet is still
     /// sent, just with an empty name field that falls back to the peer id.
-    Future<String?> Function()? localDisplayName,
-  }) : _localDisplayName = localDisplayName;
+    this.localDisplayName,
+  });
 
   final MeshDatabase _db;
   final String siteId;
-  final Future<String?> Function()? _localDisplayName;
+  final Future<String?> Function()? localDisplayName;
 
   /// A message that [RoomMessageDispatcher] is about to attempt over the
   /// live internet socket. Not yet eligible for the mesh outbox drain
@@ -158,7 +159,7 @@ class RoomRepository {
     // Resolve sender name; never let a failure here block the send.
     String? senderName;
     try {
-      final rawName = await _localDisplayName?.call();
+      final rawName = await localDisplayName?.call();
       if (rawName != null && rawName.trim().isNotEmpty) {
         senderName = rawName.trim();
       }
