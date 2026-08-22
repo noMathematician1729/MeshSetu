@@ -7,8 +7,7 @@ import { z } from 'zod'
 import { decryptPacket } from './protocol/mesh.js'
 import { createHash } from 'node:crypto'
 import { store } from './store.js'
-import { buildEmergencySms, normalizeE164 } from './twilio_sms.js'
-import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
+import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
 
 const app = express()
 const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
@@ -65,42 +64,19 @@ const publicIncidentUrl = (eventId: string) => `${publicAppOrigin()}/sos/${encod
  * packets and gateway retries cannot produce duplicate texts.
  */
 async function dispatchEmergencySms(record: any, updateType: string) {
-  const log = (level: 'info' | 'warn' | 'error', message: string, details: Record<string, unknown> = {}) => console[level]('[sos-sms]', message, { eventId: record.event_id, ...details })
-  const redactedPhone = (phone: string) => `***${phone.slice(-4)}`
-  if (updateType !== 'new') {
-    log('info', 'not sending SMS for a non-initial incident update', { updateType })
-    return
-  }
-  if (!anySmsProviderConfigured()) {
-    log('warn', 'SMS skipped: no SMS provider is enabled or configured')
-    return
-  }
-
+  if (updateType !== 'new' || !twilioSmsConfigured()) return
   const profileResolved = record.decrypt_status === 'verified'
     || record.decrypt_status === 'relay-decrypted'
     || (record.decrypt_status === 'ceal-uid-only' && Boolean(record.reporter_name))
-  if (!profileResolved || !record.reporter_uid) {
-    log('warn', 'SMS skipped: SOS is not verified or profile-resolved', { decryptStatus: record.decrypt_status ?? 'missing', hasReporterUid: Boolean(record.reporter_uid) })
-    return
-  }
+  if (!profileResolved || !record.reporter_uid) return
 
   const profile = await store.getProfile(record.reporter_uid) ?? await store.getProfileByPrefix(record.reporter_uid)
-  if (!profile) {
-    log('warn', 'SMS skipped: no registered reporter profile was found')
-    return
-  }
+  if (!profile) return
   const contacts = new Map<string, string | undefined>()
   for (const contact of profile.emergency_contacts ?? []) {
     const phone = normalizeE164(contact?.phone)
     if (phone) contacts.set(phone, contact?.name)
-    else if (contact?.phone) log('warn', 'SMS skipped for invalid emergency-contact phone', { contactIndex: contacts.size })
   }
-  if (contacts.size === 0) {
-    log('warn', 'SMS skipped: reporter has no E.164 emergency contacts')
-    return
-  }
-
-  log('info', 'preparing emergency-contact SMS deliveries', { contactCount: contacts.size, source: record.decrypt_status })
   for (const [phone, name] of contacts) {
     const deliveryId = createHash('sha256').update(`${record.event_id}\u0000${phone}`).digest('hex')
     const reserved = await store.reserveSmsDelivery({
@@ -108,19 +84,10 @@ async function dispatchEmergencySms(record: any, updateType: string) {
       recipient_name: name ?? null, state: 'reserved', provider_message_sid: null,
       failure_reason: null, created_at_ms: Date.now(), completed_at_ms: null,
     })
-    if (!reserved) {
-      log('info', 'SMS not re-sent: a delivery record already exists', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone) })
-      continue
-    }
-    log('info', 'submitting SMS to provider chain', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone) })
-    const result = await dispatchSms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
-    if (result.state === 'sent') {
-      await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: `${result.provider}:${result.providerMessageSid}` })
-      log('info', 'SMS accepted by provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), provider: result.provider, messageSid: result.providerMessageSid })
-    } else {
-      await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
-      log('error', 'SMS delivery failed on every configured provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), reason: result.reason })
-    }
+    if (!reserved) continue
+    const result = await sendEmergencySms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
+    if (result.state === 'sent') await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: result.providerMessageSid })
+    else await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
   }
 }
 
@@ -255,11 +222,21 @@ app.get('/v1/profiles/:uid', bearer, async (req, res) => { const profile = await
 app.get('/v1/profiles', bearer, async (_req, res) => res.json(await store.allProfiles()))
 
 // CEAL-style compact SOS alert with UID→profile resolution.
-const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional() })
+const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), flags: z.number().int().min(0).max(255).default(1), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional() })
+const compactEmergencyTypes = [
+  { incidentType: 'general', hazard: 'general' },
+  { incidentType: 'fire', hazard: 'fire' },
+  { incidentType: 'crime', hazard: 'crime' },
+  { incidentType: 'kidnap', hazard: 'kidnap' },
+  { incidentType: 'medical', hazard: 'medical' },
+  { incidentType: 'natural_disaster', hazard: 'natural_disaster' },
+]
+const compactEmergencyType = (flags: number) => compactEmergencyTypes[(flags >> 2) & 0x0f] ?? compactEmergencyTypes[0]
 app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const parsed = cealSosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid CEAL SOS', details: parsed.error.issues })
   const profile = await store.getProfile(parsed.data.reporter_uid) ?? await store.getProfileByPrefix(parsed.data.reporter_uid)
   const now = parsed.data.received_at_ms ?? Date.now()
+  const emergencyType = compactEmergencyType(parsed.data.flags)
   // Every nearby peer with internet forwards the same alert. Converge them on
   // one incident so the dashboard and the contacts see a single emergency.
   const existing = await store.findRecentCompactEvent(parsed.data.reporter_uid, parsed.data.sequence ?? null, now - 600000, parsed.data.site_id)
@@ -275,8 +252,9 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     site_id: parsed.data.site_id,
     room_id: 'public',
     priority: 'p0Critical',
-    incident_type: 'ceal_compact_sos',
-    transcript: profile ? `CEAL SOS from ${profile.name} (${profile.phone})` : `CEAL SOS from UID ${parsed.data.reporter_uid} (unregistered)`,
+    incident_type: emergencyType.incidentType,
+    hazards: [emergencyType.hazard],
+    transcript: profile ? `${emergencyType.incidentType} SOS from ${profile.name} (${profile.phone})` : `${emergencyType.incidentType} SOS from UID ${parsed.data.reporter_uid} (unregistered)`,
     latitude: parsed.data.latitude ?? null,
     longitude: parsed.data.longitude ?? null,
     accuracy_m: parsed.data.accuracy_m ?? null,
