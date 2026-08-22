@@ -27,11 +27,9 @@ final class OnboardingProfile {
     profileId: profileId ?? _uuid.v4(),
     reporterUid: '',
     name: name.trim(),
-    phone: canonicalE164(phone) ?? phone.trim(),
+    phone: phone.trim(),
     language: language.trim(),
-    emergencyContacts: List.unmodifiable([
-      for (final contact in emergencyContacts) contact.canonicalized(),
-    ]),
+    emergencyContacts: List.unmodifiable(emergencyContacts),
     medicalProfile: medicalProfile,
   );
 
@@ -40,9 +38,7 @@ final class OnboardingProfile {
         profileId: json['profileId'] as String? ?? '',
         reporterUid: json['reporterUid'] as String? ?? '',
         name: json['name'] as String? ?? '',
-        phone:
-            canonicalE164(json['phone'] as String? ?? '') ??
-            (json['phone'] as String? ?? '').trim(),
+        phone: json['phone'] as String? ?? '',
         language: json['language'] as String? ?? '',
         emergencyContacts: [
           for (final item in (json['emergencyContacts'] as List? ?? const []))
@@ -67,9 +63,7 @@ final class OnboardingProfile {
   String? get validationError {
     if (profileId.trim().isEmpty) return 'Profile ID is missing.';
     if (name.trim().isEmpty) return 'Enter your name.';
-    if (canonicalE164(phone) == null) {
-      return 'Enter your phone number in E.164 format, e.g. +919876543210.';
-    }
+    if (!_validPhone(phone)) return 'Enter a valid phone number.';
     if (language.trim().isEmpty) return 'Select a language.';
     if (emergencyContacts.isEmpty) {
       return 'Add at least one emergency contact.';
@@ -109,13 +103,8 @@ final class OnboardingProfile {
     'medicalProfile': medicalProfile.toJson(),
   };
 
-  /// Converts visual separators to the canonical form accepted by Twilio and
-  /// the backend. A country code is required; we never infer one from a local
-  /// number because an incorrect destination is unsafe in an emergency.
-  static String? canonicalE164(String value) {
-    final compact = value.trim().replaceAll(RegExp(r'[ ()-]'), '');
-    return RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(compact) ? compact : null;
-  }
+  static bool _validPhone(String value) =>
+      RegExp(r'^\+?[0-9][0-9 ()-]{5,23}$').hasMatch(value.trim());
 }
 
 final class EmergencyContact {
@@ -128,9 +117,7 @@ final class EmergencyContact {
   factory EmergencyContact.fromJson(Map<String, Object?> json) =>
       EmergencyContact(
         name: json['name'] as String? ?? '',
-        phone:
-            OnboardingProfile.canonicalE164(json['phone'] as String? ?? '') ??
-            (json['phone'] as String? ?? '').trim(),
+        phone: json['phone'] as String? ?? '',
         priority: (json['priority'] as num?)?.toInt() ?? 1,
       );
 
@@ -138,16 +125,10 @@ final class EmergencyContact {
   final String phone;
   final int priority;
 
-  EmergencyContact canonicalized() => EmergencyContact(
-    name: name.trim(),
-    phone: OnboardingProfile.canonicalE164(phone) ?? phone.trim(),
-    priority: priority,
-  );
-
   String? get validationError {
     if (name.trim().isEmpty) return 'Emergency contact name is required.';
-    if (OnboardingProfile.canonicalE164(phone) == null) {
-      return 'Emergency contact phone must be E.164, e.g. +919876543210.';
+    if (!OnboardingProfile._validPhone(phone)) {
+      return 'Enter a valid emergency contact phone number.';
     }
     if (priority < 1) return 'Emergency contact priority must be positive.';
     return null;

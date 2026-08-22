@@ -1,21 +1,26 @@
-# OS / editor
-*.DS_Store
+.gradle/
+build/
+*/build/
+local.properties
 .idea/
 *.iml
+
+*.DS_Store
 
 # Local secrets and environment overrides
 .env
 .env.*
 !.env.example
+admin/server/.env
+admin/client/.env
 
-# Flutter / Dart
-mobile/build/
-mobile/.dart_tool/
-mobile/.flutter-plugins-dependencies
-mobile/android/.gradle/
-mobile/android/.kotlin/
-mobile/android/local.properties
-
-# Node
+# Dependency and generated tool output
 node_modules/
 dist/
+.dart_tool/
+__pycache__/
+*.py[cod]
+.venv/
+core-model/bin/
+core-protocol/bin/
+Ceal
