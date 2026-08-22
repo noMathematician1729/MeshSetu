@@ -10,6 +10,7 @@ void main() {
       Permission.bluetoothAdvertise,
       Permission.bluetoothConnect,
       Permission.locationWhenInUse,
+      Permission.sms,
     ]);
   });
 
@@ -20,6 +21,7 @@ void main() {
       Permission.bluetoothConnect,
       Permission.locationWhenInUse,
       Permission.notification,
+      Permission.sms,
     ]);
   });
 

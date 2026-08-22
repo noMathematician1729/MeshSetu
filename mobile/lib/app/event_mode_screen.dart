@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/device_key_store.dart';
+import '../core/ble/device_sms_service.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/data/database.dart';
@@ -672,6 +673,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               'MeshSetu\nCompact SOS alert received · forwarding to admin';
         });
         unawaited(_forwardReceivedCealSos(data));
+        // Belt-and-suspenders: also send device-native SMS immediately from
+        // this phone's SIM so emergency contacts are notified even when the
+        // admin server is unreachable or internet is down on the relay device.
+        unawaited(_sendDeviceSmsForCompactSos(data));
       case 'mesh_test_origin_submitted':
         final envelopeJson = data['envelope'];
         if (envelopeJson is Map) {
@@ -956,6 +961,60 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         setState(() => _status = 'MeshSetu\nCompact SOS relay error: $error');
       }
     }
+  }
+
+  /// Sends a device-native SMS from this phone's SIM to every emergency
+  /// contact in the locally stored onboarding profile when a compact SOS is
+  /// relayed through this device.
+  ///
+  /// This fires in addition to the admin-server forwarding path so contacts
+  /// are reached even when the internet gateway is unavailable. The SMS is
+  /// sent from this relay device's own number — no API key or billing account
+  /// required — using Android's [SmsManager] via [DeviceSmsService].
+  Future<void> _sendDeviceSmsForCompactSos(Map data) async {
+    try {
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      if (profile == null || profile.emergencyContacts.isEmpty) return;
+
+      // Build a compact body with whatever location the compact alert carries.
+      final lat = (data['latitude'] as num?)?.toDouble();
+      final lon = (data['longitude'] as num?)?.toDouble();
+      final flags = data['flags'] as int? ?? 0;
+      // Derive a human-readable emergency type from the SOS flags using the
+      // same mapping the admin server uses for CEAL alerts.
+      final emergencyType = _emergencyTypeLabel(flags);
+
+      final body = DeviceSmsService.buildBody(
+        reporterName: 'Unknown — nearby SOS',
+        latitude: lat,
+        longitude: lon,
+        emergencyType: emergencyType,
+      );
+
+      final phones = [
+        for (final contact in profile.emergencyContacts) contact.phone,
+      ];
+
+      final sent = await DeviceSmsService.sendToAll(phones, body);
+      if (sent > 0 && mounted) {
+        setState(
+          () => _status =
+              'MeshSetu\nSOS relayed · $sent contact${sent == 1 ? '' : 's'} notified via device SMS',
+        );
+      }
+    } catch (_) {
+      // Device SMS failure must never interrupt the BLE relay or the admin
+      // forwarding path.
+    }
+  }
+
+  static String _emergencyTypeLabel(int flags) {
+    // Mirrors the CEAL flag→type mapping in admin/server/src/server.ts.
+    const types = [
+      'general', 'fire', 'crime', 'kidnap', 'medical', 'natural_disaster',
+    ];
+    final index = (flags >> 2) & 0x0f;
+    return index < types.length ? types[index] : 'general';
   }
 
   /// Replaces the "you are relaying" alert with the decrypted/resolved

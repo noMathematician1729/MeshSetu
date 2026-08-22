@@ -18,6 +18,10 @@ abstract final class BlePermissions {
         // physical proximity from scan results and cannot use neverForLocation.
         Permission.locationWhenInUse,
         if (sdkInt >= 33) Permission.notification,
+        // Device-native SMS to emergency contacts when internet is unavailable.
+        // Requested here alongside BLE so the user sees it once at startup
+        // rather than at the first incoming SOS.
+        Permission.sms,
       ];
     }
     return const [Permission.locationWhenInUse];

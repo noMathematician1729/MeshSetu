@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.telephony.SmsManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -22,10 +24,12 @@ class MainActivity : FlutterActivity() {
         const val EXTRA_EMERGENCY_GESTURE = "emergency_gesture"
         private const val GESTURE_PREFERENCES = "meshsetu_emergency_gestures"
         private const val PENDING_TYPED_SOS_GESTURE = "pending_typed_sos_gesture"
+        private const val TAG = "MeshSetuMainActivity"
     }
 
     private val locationChannel = "meshsetu/location"
     private val emergencyGestureChannel = "meshsetu/emergency-gestures"
+    private val smsChannel = "meshsetu/device-sms"
     private var emergencyGestureMethodChannel: MethodChannel? = null
     private var pendingTypedSosGesture: String? = null
     private var dartGestureListenerReady = false
@@ -50,6 +54,48 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // Device-native SMS channel. Sends SMS from the device's own SIM card
+        // so emergency contacts can be reached even when the internet gateway
+        // is unavailable. Requires SEND_SMS permission granted at runtime.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, smsChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "sendSms" -> {
+                        val phone = call.argument<String>("phone")
+                        val message = call.argument<String>("message")
+                        if (phone.isNullOrBlank() || message.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "phone and message are required", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            @Suppress("DEPRECATION")
+                            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                applicationContext.getSystemService(SmsManager::class.java)
+                            } else {
+                                SmsManager.getDefault()
+                            }
+                            if (smsManager == null) {
+                                result.error("SMS_UNAVAILABLE", "SmsManager is not available on this device", null)
+                                return@setMethodCallHandler
+                            }
+                            val parts = smsManager.divideMessage(message)
+                            if (parts.size == 1) {
+                                smsManager.sendTextMessage(phone, null, message, null, null)
+                            } else {
+                                smsManager.sendMultipartTextMessage(phone, null, parts, null, null)
+                            }
+                            Log.d(TAG, "Device SMS sent to ***${phone.takeLast(4)}")
+                            result.success(true)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Device SMS failed: ${e.message}")
+                            result.error("SMS_FAILED", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
         val gestureMethodChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             emergencyGestureChannel,

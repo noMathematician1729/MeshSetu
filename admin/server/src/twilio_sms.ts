@@ -39,6 +39,65 @@ export function buildEmergencySms(record: Record<string, any>, contactName?: str
     .join('\n')
 }
 
+/**
+ * Single-segment emergency body for destinations where long, link-heavy SMS is
+ * unreliable — notably India, whose carriers split or filter multi-segment
+ * messages. Mirrors the format already proven in production by the CEAL
+ * backend: plain ASCII, no emoji, one GSM-7 segment.
+ *
+ * Content is assembled in reading order, but each part carries a drop priority
+ * so the least important information is shed first when the 160-character
+ * budget is exceeded: the incident detail URL goes first, then the incident
+ * type, then the coordinates. The opening alert line and the "Call 112."
+ * call-to-action are never dropped.
+ *
+ * Coordinates are emitted both as bare digits and as a plain (never shortened)
+ * Google Maps link, so the location survives even if a carrier strips links.
+ */
+export function buildCompactEmergencySms(
+  record: Record<string, any>,
+  contactName?: string,
+  incidentUrl?: string,
+): string {
+  const maxSegmentChars = 160
+  const reporter =
+    String(record.reporter_name ?? record.reporter_uid ?? '').trim() || 'Someone'
+  const hasLocation = record.latitude != null && record.longitude != null
+  const coordinates = hasLocation
+    ? `${Number(record.latitude).toFixed(5)},${Number(record.longitude).toFixed(5)}`
+    : undefined
+  const incidentType = String(record.incident_type ?? '').trim()
+  const recipient = String(contactName ?? '').trim()
+
+  // Higher `drop` is shed sooner once the single-segment budget is exceeded.
+  const parts: Array<{ text: string; drop: number }> = [
+    { text: `EMERGENCY: ${reporter} needs help.`, drop: 0 },
+  ]
+  if (recipient) parts.push({ text: `For ${recipient}.`, drop: 4 })
+  if (incidentType) parts.push({ text: `Type: ${incidentType}`, drop: 2 })
+  if (coordinates) {
+    parts.push({ text: coordinates, drop: 1 })
+    parts.push({ text: `https://maps.google.com/?q=${coordinates}`, drop: 1 })
+  }
+  parts.push({ text: 'Call 112.', drop: 0 })
+  if (incidentUrl) parts.push({ text: incidentUrl, drop: 3 })
+
+  for (const threshold of [5, 4, 3, 2, 1]) {
+    const body = parts
+      .filter((part) => part.drop < threshold)
+      .map((part) => part.text)
+      .join('\n')
+    if (body.length <= maxSegmentChars) return body
+  }
+  // Even the essentials overflow: truncate rather than risk a multi-segment
+  // send that a carrier may split or reject outright.
+  return parts
+    .filter((part) => part.drop === 0)
+    .map((part) => part.text)
+    .join('\n')
+    .slice(0, maxSegmentChars)
+}
+
 /** Uses Twilio's HTTPS API; credentials come exclusively from deployment env. */
 export async function sendEmergencySms(
   to: string,

@@ -9,8 +9,9 @@ import { createHash } from 'node:crypto'
 import { store } from './store.js'
 import { triageSos } from './triage.js'
 import { findNearbyAuthorities } from './authorities.js'
-import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
+import { buildCompactEmergencySms, buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
 import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
+import { indianSubscriberNumber } from './fast2sms.js'
 
 const app = express()
 const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
@@ -115,10 +116,25 @@ async function dispatchEmergencySms(record: any, updateType: string) {
       continue
     }
     log('info', 'submitting SMS to provider chain', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone) })
-    const result = await dispatchSms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
+    // Indian carriers split or filter multi-segment, link-heavy SMS, so +91
+    // contacts get the single-segment body. Other destinations keep the rich
+    // field list.
+    const incidentUrl = publicIncidentUrl(record.event_id)
+    const body = indianSubscriberNumber(phone)
+      ? buildCompactEmergencySms(record, name, incidentUrl)
+      : buildEmergencySms(record, name, incidentUrl)
+    const result = await dispatchSms(phone, body)
     if (result.state === 'sent') {
       await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: `${result.provider}:${result.providerMessageSid}` })
       log('info', 'SMS accepted by provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), provider: result.provider, messageSid: result.providerMessageSid })
+      if (result.attemptFailures.length > 0) {
+        // A preferred provider is broken but the fallback masked it. Surface it
+        // so an unfunded wallet or expired key cannot degrade silently.
+        log('warn', 'SMS delivered by a fallback provider; a preferred provider rejected it', {
+          deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone),
+          deliveredBy: result.provider, rejectedBy: result.attemptFailures,
+        })
+      }
     } else {
       await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
       log('error', 'SMS delivery failed on every configured provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), reason: result.reason })
