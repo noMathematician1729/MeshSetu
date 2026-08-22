@@ -12,7 +12,7 @@
 mobile/build/
 mobile/.dart_tool/
 mobile/.flutter-plugins-dependencies
-mobile/android/.gradle/
+mobile/**/.gradle/
 mobile/android/.kotlin/
 mobile/android/local.properties
 
