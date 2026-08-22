@@ -8,19 +8,11 @@ export const capabilities = [
 ];
 
 export const steps = [
-  { number: '01', title: 'Join the local event', text: 'Enter a Mesh Code or scan a QR to load the event and Rooms available to your role.' },
-  { number: '02', title: 'Create an SOS', text: 'Send a typed report or short voice clip. The SOS is saved locally before transmission.' },
-  { number: '03', title: 'Relay nearby', text: 'Encrypted message fragments are stored and forwarded over BLE with bounded retries.' },
-  { number: '04', title: 'Reach the control room', text: 'An optional gateway phone bridges verified incidents to a laptop on the local network.' },
-];
-
-export const safetyRules = [
-  'A manual SOS is never blocked by speech or triage failure.',
-  'SOS metadata always outranks chat and voice chunks.',
-  'Uncertainty in transcription, triage, and location remains visible.',
-  'Incomplete voice never prevents the structured SOS from being actionable.',
-  'AI recommends; human authorities make the final decision.',
-  'Messages expire, deduplicate, and stop relaying at their hop limit.',
+  { title: 'Onboarding', text: 'Open MeshSetu once to create a lightweight local profile. Your device is ready to participate in a nearby response network before an emergency begins.' },
+  { title: 'Join a room or event', text: 'When relevant, optionally join a trusted room or event. This gives the people around you a shared local context without making it a requirement to send an SOS.' },
+  { title: 'Choose your SOS', text: 'Choose the fastest way to explain what is happening: a general SOS, a short voice SOS, or a text SOS. The essential structured signal is saved first.' },
+  { title: 'BLE carries it onward', text: 'If the internet is unavailable, nearby phones carry the encrypted message onward over Bluetooth Low Energy. Each relay stores it briefly, then passes it toward a gateway.' },
+  { title: 'Control room reached', text: 'When the signal reaches a connected gateway, the local control room receives the verified SOS with the details responders need to act.' },
 ];
 
 export const demoStages = [

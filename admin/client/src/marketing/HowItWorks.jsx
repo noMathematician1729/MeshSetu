@@ -1,13 +1,48 @@
+import { useLayoutEffect, useRef } from 'react';
+import { gsap } from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { steps } from './content.js';
 import SectionLabel from './SectionLabel';
 
+gsap.registerPlugin(ScrollTrigger);
+
 export default function HowItWorks() {
+  const journeyRef = useRef(null);
+  const viewportRef = useRef(null);
+  const trackRef = useRef(null);
+
+  useLayoutEffect(() => {
+    const context = gsap.context(() => {
+      const media = gsap.matchMedia();
+      media.add('(min-width: 681px)', () => {
+        const distance = () => Math.max(0, trackRef.current.scrollWidth - viewportRef.current.clientWidth);
+        const journey = gsap.to(trackRef.current, {
+          x: () => -distance(),
+          ease: 'none',
+          scrollTrigger: {
+            trigger: journeyRef.current,
+            start: 'top top',
+            end: () => `+=${distance()}`,
+            pin: viewportRef.current,
+            scrub: 2.4,
+            invalidateOnRefresh: true,
+            onUpdate: (self) => journeyRef.current.style.setProperty('--journey-gradient-stop', `${82 - self.progress * 44}%`),
+          },
+        });
+        return () => journey.kill();
+      });
+      return () => media.revert();
+    }, journeyRef);
+    return () => context.revert();
+  }, []);
+
   return (
-    <section className="how section-yellow" id="how-it-works">
-      <div className="container"><div className="section-heading section-heading--split"><div><SectionLabel>From SOS to response</SectionLabel><h2>A local path to help, <em>one device</em> at a time.</h2></div><p>Every participating phone can become part of the path. The system keeps the essential message moving, even as optional layers gracefully fall away.</p></div>
-        <div className="steps-grid">{steps.map((step, index) => <article className="step-card" key={step.number}><div className="step-top"><span className="step-number">{step.number}</span>{index < steps.length - 1 && <span className="step-arrow" aria-hidden="true">→</span>}</div><h3>{step.title}</h3><p>{step.text}</p></article>)}</div>
-        <div className="annotation"><span className="annotation-mark">!</span><strong>Structured SOS first.</strong> Voice evidence and routine messages follow.</div>
-      </div>
+    <section className="how section-yellow" id="how-it-works" ref={journeyRef}>
+      <div className="how-journey__viewport" ref={viewportRef}><div className="how-journey__track" ref={trackRef}>
+        <header className="how-journey__intro"><SectionLabel>How it works</SectionLabel><h2>One SOS.<br /><em>Every step.</em></h2><p>Scroll down to trace how one signal moves from a phone in the field to the people ready to respond.</p><span>Scroll to follow the signal <b>↓</b></span></header>
+        {steps.map((step) => <article className="journey-step" key={step.title}><div><h3>{step.title}</h3><p>{step.text}</p></div></article>)}
+        <div className="how-journey__end" aria-hidden="true" />
+      </div></div>
     </section>
   );
 }

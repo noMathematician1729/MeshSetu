@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import Highlighter from './Highlighter';
 
 const phonePositions = [
   new THREE.Vector3(-6.2, 0.2, 1.8), new THREE.Vector3(-3.35, 0.9, -1.1), new THREE.Vector3(-0.25, 0.1, 1.05),
@@ -289,7 +290,7 @@ export default function MeshSimulation() {
 
   return <section className="mesh-simulation" id="simulation">
     <div className="container">
-      <div className="mesh-simulation__heading"><div><p className="section-label">Live relay simulation</p><h2>Click a phone to send an SOS <em>through the mesh.</em></h2></div><p>Add phones and beacons to grow the network. Then select any phone to route its signed emergency message to help.</p></div>
+      <div className="mesh-simulation__heading"><div><p className="section-label">Live relay simulation</p><h2>Click a phone to send an SOS <em>through the mesh.</em></h2></div><p>Add phones and beacons to grow the network. Then select any phone to route its <Highlighter action="highlight" color="#87CEFA">signed emergency message</Highlighter> to help.</p></div>
       <div className="mesh-simulation__stage">
         <nav className="mesh-simulation__timeline" aria-label="Message route progress">{['PHONE 1', 'PHONE 2', 'PHONE 3', 'BEACON', 'RESPONSE HUB'].map((item, index) => <span key={item} className={index <= activeStage ? 'active' : ''}><b>{String(index + 1).padStart(2, '0')}</b>{item}</span>)}</nav>
         <div ref={mountRef} className="mesh-simulation__canvas" aria-label="Interactive 3D MeshSetu message relay simulation" />
