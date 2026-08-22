@@ -735,12 +735,13 @@ class MeshEventController {
 
   /// Sends an immediately detectable emergency alert independently of GATT.
   /// Rich SOS data remains in the normal durable GATT envelope.
-  Future<void> broadcastCompactSos({
+  Future<bool> broadcastCompactSos({
     bool isTest = false,
     SosEmergencyType emergencyType = SosEmergencyType.general,
     int? originId,
     int? sequence,
     String? reporterUidHex,
+    int? objectId,
   }) async {
     final metadata = _discoveryMetadata;
     if (!_looping || metadata == null) {
@@ -756,11 +757,35 @@ class MeshEventController {
           ? ''
           : MeshSosAdvertisement.normalizeReporterUid(reporterUidHex),
     );
-    _reportMetrics([RelayMetric('sos_alert_broadcast', value: alert.sequence)]);
+    var started = false;
     try {
-      await MeshAdvertiser.broadcastSos(alert, metadata);
+      await MeshAdvertiser.broadcastSos(
+        alert,
+        metadata,
+        onStarted: () {
+          started = true;
+          _reportMetrics([
+            RelayMetric(
+              'sos_alert_broadcast_started',
+              objectId: objectId,
+              value: alert.sequence,
+              detail:
+                  'compact SOS campaign verified on air for ${MeshAdvertiser.compactSosBroadcastDuration.inSeconds}s',
+            ),
+            RelayMetric(
+              'sos_alert_broadcast',
+              objectId: objectId,
+              value: alert.sequence,
+            ),
+          ]);
+        },
+      );
+      return started;
     } catch (error) {
-      _reportMetrics([RelayMetric('sos_alert_failed', detail: '$error')]);
+      _reportMetrics([
+        RelayMetric('sos_alert_failed', objectId: objectId, detail: '$error'),
+      ]);
+      return false;
     }
   }
 

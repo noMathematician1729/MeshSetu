@@ -16,6 +16,7 @@ import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
 import 'sos_alert_notifications.dart';
+import 'sos_delivery.dart';
 import 'sos_incident_navigator.dart';
 
 /// Snapshot of the foreground mesh service's connectivity, observable from
@@ -95,6 +96,7 @@ class MeshBridgeClient {
   final MeshDatabase _db;
   final Future<void> Function(MeshEnvelope envelope)? _sendToMeshOverride;
   void Function(MeshEnvelope envelope, Object? error)? onOriginForward;
+  void Function(SosDeliveryEvent event)? onSosDelivery;
   final bool registerTaskDataCallback;
   final bool syncRelayInbox;
   OutboxSender? _outbox;
@@ -103,6 +105,7 @@ class MeshBridgeClient {
   String? _siteId;
   int? _localEphemeralId;
   final Map<int, Completer<void>> _pendingSubmissions = {};
+  final Map<int, String> _sosEventIds = {};
   final Map<int, Timer> _submissionTimers = {};
   final Set<int> _storedObjectIds = {};
   final Set<int> _forwardedObjectIds = {};
@@ -232,10 +235,52 @@ class MeshBridgeClient {
     )..start();
   }
 
+  Future<void> _emitSosDelivery({
+    required SosDeliveryEventKind kind,
+    required int objectId,
+    String? eventId,
+    String? peerId,
+    String? detail,
+  }) async {
+    final callback = onSosDelivery;
+    if (callback == null || objectId <= 0) return;
+    var resolvedEventId = eventId ?? _sosEventIds[objectId];
+    if (resolvedEventId == null) {
+      final row = await (_db.select(
+        _db.outboxEvents,
+      )..where((table) => table.objectId.equals(objectId))).getSingleOrNull();
+      if (row?.payloadType == PayloadType.structuredSos.name) {
+        resolvedEventId = row!.eventId;
+        _sosEventIds[objectId] = resolvedEventId;
+      }
+    }
+    if (resolvedEventId == null) return;
+    callback(
+      SosDeliveryEvent(
+        kind: kind,
+        objectId: objectId,
+        eventId: resolvedEventId,
+        peerId: peerId,
+        detail: detail,
+      ),
+    );
+  }
+
   Future<void> _sendToMesh(MeshEnvelope envelope) async {
+    if (envelope.payloadType == PayloadType.structuredSos) {
+      _sosEventIds[envelope.objectId] = envelope.eventId;
+    }
     final override = _sendToMeshOverride;
     if (override != null) {
       await override(envelope);
+      if (envelope.payloadType == PayloadType.structuredSos) {
+        await _emitSosDelivery(
+          kind: SosDeliveryEventKind.queued,
+          objectId: envelope.objectId,
+          eventId: envelope.eventId,
+          detail: 'SOS accepted by the mesh transport test bridge.',
+        );
+      }
       return;
     }
     if (!await FlutterForegroundTask.isRunningService) {
@@ -287,9 +332,23 @@ class MeshBridgeClient {
       case 'mesh_submit_result':
         final objectId = data['objectId'];
         if (objectId is! int) return;
+        final accepted = data['accepted'] == true;
+        unawaited(
+          _emitSosDelivery(
+            kind: accepted
+                ? SosDeliveryEventKind.queued
+                : SosDeliveryEventKind.failed,
+            objectId: objectId,
+            eventId: data['eventId'] as String?,
+            detail: accepted
+                ? 'Encrypted SOS accepted by the foreground mesh; awaiting a peer acknowledgement.'
+                : data['reason'] as String? ??
+                      'Foreground mesh rejected the SOS.',
+          ),
+        );
         final pending = _pendingSubmissions[objectId];
         if (pending == null || pending.isCompleted) return;
-        if (data['accepted'] == true) {
+        if (accepted) {
           pending.complete();
         } else {
           pending.completeError(
@@ -331,6 +390,47 @@ class MeshBridgeClient {
                 siteMismatchDetected: (metric.value ?? 0) > 0,
               ),
             );
+          }
+          final objectId = metric.objectId;
+          if (objectId == null) continue;
+          switch (metric.kind) {
+            case 'sos_alert_broadcast_started':
+              unawaited(
+                _emitSosDelivery(
+                  kind: SosDeliveryEventKind.broadcastStarted,
+                  objectId: objectId,
+                  detail:
+                      metric.detail ??
+                      'Compact SOS is broadcasting nearby; awaiting a mesh peer.',
+                ),
+              );
+            case 'sos_alert_failed':
+              unawaited(
+                _emitSosDelivery(
+                  kind: SosDeliveryEventKind.broadcastFailed,
+                  objectId: objectId,
+                  detail: metric.detail,
+                ),
+              );
+            case 'ack' || 'custody_ack_received':
+              unawaited(
+                _emitSosDelivery(
+                  kind: SosDeliveryEventKind.relayConfirmed,
+                  objectId: objectId,
+                  peerId: metric.peerId,
+                  detail: 'A nearby mesh peer confirmed custody of the SOS.',
+                ),
+              );
+            case 'expired':
+              unawaited(
+                _emitSosDelivery(
+                  kind: SosDeliveryEventKind.expired,
+                  objectId: objectId,
+                  detail: 'SOS expired before a mesh peer acknowledged it.',
+                ),
+              );
+            default:
+              break;
           }
         }
         unawaited(_outbox?.onMetrics(decoded) ?? Future.value());
@@ -603,6 +703,7 @@ class MeshBridgeClient {
     _storedObjectIds.clear();
     _forwardedObjectIds.clear();
     _forwardingObjectIds.clear();
+    _sosEventIds.clear();
     _meshStatus = MeshStatus.stopped;
     await _meshStatusController.close();
   }

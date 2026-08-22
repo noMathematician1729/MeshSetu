@@ -87,7 +87,7 @@ abstract final class SosAlertNotifications {
 
   /// Shows or replaces an emergency alert. [payload] carries the incident
   /// page URL that a tap should open.
-  static Future<void> show({
+  static Future<bool> show({
     required int id,
     required String title,
     required String body,
@@ -117,8 +117,11 @@ abstract final class SosAlertNotifications {
           ),
         ),
       );
+      return true;
     } catch (_) {
-      // A notification failure must never stop BLE relaying.
+      // A notification failure must never stop BLE relaying. The caller can
+      // use the false result to surface receiver diagnostics to the UI.
+      return false;
     }
   }
 }

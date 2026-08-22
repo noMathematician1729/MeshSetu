@@ -75,7 +75,7 @@ Future<void> _showSosNotification({
 }
 
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  await SosAlertNotifications.show(
+  final shown = await SosAlertNotifications.show(
     id: SosAlertNotifications.idForKey(alert.dedupeKey),
     title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED · MESH',
     body: alert.isTest
@@ -89,6 +89,14 @@ Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
         ? null
         : SosIncidentNavigator.payloadForCompactAlert(alert),
   );
+  if (!shown) {
+    FlutterForegroundTask.sendDataToMain({
+      'status': 'compact_sos_notification_failed',
+      'dedupeKey': alert.dedupeKey,
+      'message':
+          'SOS received over Bluetooth, but Android did not display the notification. Check Notifications permission and channel settings.',
+    });
+  }
 }
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
@@ -356,6 +364,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       FlutterForegroundTask.sendDataToMain({
         'status': 'mesh_submit_result',
         'objectId': envelope.objectId,
+        'eventId': envelope.eventId,
         'accepted': false,
         'reason': 'event mode is not ready',
       });
@@ -381,6 +390,7 @@ class _MeshEventTaskHandler extends TaskHandler {
             sequence: envelope.objectId & 0xffff,
             reporterUidHex: reporterUid,
             emergencyType: emergencyType,
+            objectId: envelope.objectId,
           ),
         );
       }
@@ -388,6 +398,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       FlutterForegroundTask.sendDataToMain({
         'status': 'mesh_submit_result',
         'objectId': envelope.objectId,
+        'eventId': envelope.eventId,
         'accepted': true,
       });
       if (envelope.payloadType == PayloadType.structuredSos ||
@@ -402,6 +413,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       FlutterForegroundTask.sendDataToMain({
         'status': 'mesh_submit_result',
         'objectId': envelope.objectId,
+        'eventId': envelope.eventId,
         'accepted': false,
         'reason': '$error',
       });

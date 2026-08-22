@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshsetu_mobile/app/sos_delivery.dart';
 import 'package:meshsetu_mobile/core/ble/sos_advertisement.dart';
 import 'package:meshsetu_mobile/feature/sos/compact_sos_packet_screen.dart';
 import 'package:meshsetu_mobile/feature/sos/emergency_active_screen.dart';
@@ -90,6 +91,90 @@ void main() {
       );
       expect(locationStep.complete, isFalse);
     });
+
+    testWidgets('does not claim delivery before a peer acknowledgement', (
+      tester,
+    ) async {
+      final tracker = SosDeliveryTracker(
+        const SosDeliveryStatus(
+          eventId: 'event-1',
+          objectId: 41,
+          phase: SosDeliveryPhase.queued,
+          locationStatus: 'GPS captured',
+        ),
+      );
+      addTearDown(tracker.dispose);
+      await tester.pumpWidget(
+        _wrap(
+          EmergencyActiveScreen(
+            locationStatus: 'GPS captured',
+            meshActive: true,
+            delivery: tracker,
+          ),
+        ),
+      );
+
+      expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
+      expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+      expect(
+        tester
+            .widgetList<MeshEmergencyStep>(find.byType(MeshEmergencyStep))
+            .firstWhere((step) => step.title == 'Queued for emergency mesh')
+            .complete,
+        isFalse,
+      );
+
+      tracker.apply(
+        const SosDeliveryEvent(
+          kind: SosDeliveryEventKind.relayConfirmed,
+          objectId: 41,
+          eventId: 'event-1',
+          peerId: 'receiver-1',
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Emergency mesh delivery confirmed'), findsNWidgets(2));
+      expect(find.text('SOS saved · mesh relay pending'), findsNothing);
+    });
+
+    testWidgets(
+      'shows broadcast degradation without claiming remote delivery',
+      (tester) async {
+        final tracker = SosDeliveryTracker(
+          const SosDeliveryStatus(
+            eventId: 'event-2',
+            objectId: 42,
+            phase: SosDeliveryPhase.queued,
+            locationStatus: 'Location unavailable',
+          ),
+        );
+        addTearDown(tracker.dispose);
+        tracker.apply(
+          const SosDeliveryEvent(
+            kind: SosDeliveryEventKind.broadcastFailed,
+            objectId: 42,
+            detail: 'BLE advertiser rejected the campaign',
+          ),
+        );
+        await tester.pumpWidget(
+          _wrap(
+            EmergencyActiveScreen(
+              locationStatus: 'Location unavailable',
+              meshActive: true,
+              delivery: tracker,
+            ),
+          ),
+        );
+
+        expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
+        expect(
+          find.textContaining('Compact BLE broadcast unavailable'),
+          findsOneWidget,
+        );
+        expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+      },
+    );
 
     testWidgets('return to home pops the screen', (tester) async {
       await tester.pumpWidget(

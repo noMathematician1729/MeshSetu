@@ -127,13 +127,19 @@ abstract final class MeshAdvertiser {
     await UniversalBlePeripheral.stopAdvertising();
   }
 
+  /// Compact SOS campaigns are intentionally longer than the scanner's normal
+  /// idle/backoff window. A receiver can therefore be between scan windows
+  /// when the first pulse is sent, without losing the emergency alert.
+  static const Duration compactSosBroadcastDuration = Duration(seconds: 25);
+
   /// Temporarily replaces discovery metadata with a continuously repeated SOS
   /// advertisement. Android broadcasts the active advertisement repeatedly;
   /// the normal discovery beacon is restored after the bounded alert window.
   static Future<void> broadcastSos(
     MeshSosAdvertisement alert,
     DiscoveryMetadata discovery, {
-    Duration duration = const Duration(seconds: 2),
+    Duration duration = compactSosBroadcastDuration,
+    FutureOr<void> Function()? onStarted,
   }) => _advertisingLock.synchronized(() async {
     final generation = ++_advertisingGeneration;
     await UniversalBlePeripheral.stopAdvertising();
@@ -151,6 +157,11 @@ abstract final class MeshAdvertiser {
           ),
         ),
       );
+      final state = await _waitForAdvertising();
+      if (state != PeripheralAdvertisingState.advertising) {
+        throw StateError('SOS advertising state is ${state.name}');
+      }
+      await onStarted?.call();
       await Future<void>.delayed(duration);
     } finally {
       // Do not revive the advertiser after event mode explicitly stopped.

@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:drift/native.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:test/test.dart';
 import 'package:meshsetu_mobile/app/mesh_bridge_client.dart';
+import 'package:meshsetu_mobile/app/sos_delivery.dart';
 import 'package:meshsetu_mobile/core/data/database.dart';
 import 'package:meshsetu_mobile/core/model/model.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_policy.dart';
@@ -122,10 +125,7 @@ void main() {
       expect(client.meshStatus.blockedReason, 'Turn on Location in Settings.');
       expect(client.meshStatus.eventModeRunning, isFalse);
 
-      client.handleTaskData(const {
-        'status': 'started',
-        'localEphemeralId': 5,
-      });
+      client.handleTaskData(const {'status': 'started', 'localEphemeralId': 5});
       expect(client.meshStatus.blockedReason, isNull);
       expect(client.meshStatus.eventModeRunning, isTrue);
     },
@@ -155,6 +155,65 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
       expect(client.meshStatus.siteMismatchDetected, isFalse);
+    },
+  );
+
+  test(
+    'correlates foreground acceptance, broadcast, and custody ACK to one SOS',
+    () async {
+      const eventId = 'sos-event-1';
+      const objectId = 91;
+      await database
+          .into(database.outboxEvents)
+          .insert(
+            OutboxEventsCompanion.insert(
+              eventId: eventId,
+              objectId: const Value(objectId),
+              siteId: 'site',
+              roomId: 'public',
+              payloadType: PayloadType.structuredSos.name,
+              priority: PriorityBand.p0Critical.name,
+              payload: Value(Uint8List.fromList([1])),
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              expiresAtMs: 9999999999999,
+            ),
+          );
+      final events = <SosDeliveryEvent>[];
+      client.onSosDelivery = events.add;
+
+      client.handleTaskData(const {
+        'status': 'mesh_submit_result',
+        'objectId': objectId,
+        'eventId': eventId,
+        'accepted': true,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      client.handleTaskData(const {
+        'status': 'mesh_metric',
+        'metrics': [
+          {
+            'kind': 'sos_alert_broadcast_started',
+            'objectId': objectId,
+            'detail': 'campaign verified',
+          },
+        ],
+      });
+      client.handleTaskData(const {
+        'status': 'mesh_metric',
+        'metrics': [
+          {'kind': 'ack', 'objectId': objectId, 'peerId': 'receiver-1'},
+        ],
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(events.map((event) => event.kind), [
+        SosDeliveryEventKind.queued,
+        SosDeliveryEventKind.broadcastStarted,
+        SosDeliveryEventKind.relayConfirmed,
+      ]);
+      expect(events.every((event) => event.eventId == eventId), isTrue);
+      expect(events.last.peerId, 'receiver-1');
     },
   );
 }

@@ -36,6 +36,7 @@ import 'event_mode_launcher.dart';
 import 'incident_summary.dart';
 import 'providers.dart';
 import 'sos_alert_notifications.dart';
+import 'sos_delivery.dart';
 import 'sos_incident_navigator.dart';
 
 /// Port of `in.meshsetu.app.MainActivity` (Kotlin `MainActivity.kt`), plus
@@ -79,6 +80,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String? _receivedSosSiteId;
   int? _foregroundEphemeralId;
   MeshBridgeClient? _bridgeClient;
+  SosDeliveryTracker? _activeSosTracker;
+  String? _preparingSosEventId;
+  final List<SosDeliveryEvent> _pendingSosDeliveryEvents = [];
   late final TextEditingController _adminServerController;
   late final TextEditingController _gatewayKeyController;
   final VoiceRecorder _sttRecorder = VoiceRecorder.withCap(
@@ -215,15 +219,21 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               'MeshSetu\n${data['message'] ?? 'Test SOS could not queue'}';
         });
       case 'compact_sos_received':
+        final packet = data['dedupeKey'] ?? 'unknown packet';
         setState(() {
           _status =
-              'MeshSetu\nCompact SOS alert received · forwarding to admin';
+              'MeshSetu\nCompact SOS received over BLE\nPacket $packet\nForwarding to admin and emergency contacts';
         });
         unawaited(_forwardReceivedCealSos(data));
         // Belt-and-suspenders: also send device-native SMS immediately from
         // this phone's SIM so emergency contacts are notified even when the
         // admin server is unreachable or internet is down on the relay device.
         unawaited(_sendDeviceSmsForCompactSos(data));
+      case 'compact_sos_notification_failed':
+        setState(() {
+          _status =
+              'MeshSetu\n${data['message'] ?? 'SOS received by Bluetooth, but notification display failed'}';
+        });
       case 'mesh_test_origin_submitted':
         final envelopeJson = data['envelope'];
         if (envelopeJson is Map) {
@@ -718,6 +728,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           emergencyType: emergencyType,
         ),
       );
+      _preparingSosEventId = eventId;
       final locationEnabled = ref.read(locationSharingProvider);
       final permission = locationEnabled
           ? await Permission.locationWhenInUse.request()
@@ -731,6 +742,33 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         await repo.attachLocation(eventId, location);
       }
       await repo.finalizeAndEnqueue(eventId);
+      final row =
+          await (ref
+                  .read(databaseProvider)
+                  .select(ref.read(databaseProvider).outboxEvents)
+                ..where((event) => event.eventId.equals(eventId)))
+              .getSingle();
+      final objectId = row.objectId;
+      if (objectId == null) {
+        throw StateError('SOS was finalized without a transport object ID');
+      }
+      _activeSosTracker?.dispose();
+      final tracker = SosDeliveryTracker(
+        SosDeliveryStatus(
+          eventId: eventId,
+          objectId: objectId,
+          phase: SosDeliveryPhase.queued,
+          locationStatus: locationResult.status,
+          detail:
+              'SOS saved locally and queued for the emergency mesh. Delivery is not confirmed yet.',
+        ),
+      );
+      _activeSosTracker = tracker;
+      for (final event in _pendingSosDeliveryEvents) {
+        tracker.apply(event);
+      }
+      _pendingSosDeliveryEvents.clear();
+      _preparingSosEventId = null;
       if (mounted) {
         final adminForwardingConfigured =
             ref.read(gatewayEnabledProvider) &&
@@ -747,9 +785,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             builder: (_) => EmergencyActiveScreen(
               locationStatus: locationResult.status,
               meshActive: _eventModeActive,
+              delivery: tracker,
             ),
           ),
         );
+        if (identical(_activeSosTracker, tracker)) {
+          tracker.dispose();
+          _activeSosTracker = null;
+        }
         if (mounted) {
           setState(() {
             _selectedEmergencyType = SosEmergencyType.general;
@@ -762,6 +805,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         setState(() => _status = 'MeshSetu\nSOS packet failed: $error');
       }
     } finally {
+      _preparingSosEventId = null;
+      if (_activeSosTracker == null) _pendingSosDeliveryEvents.clear();
       if (mounted) setState(() => _sosPacketSending = false);
     }
   }
@@ -931,7 +976,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     // only ever surfaces the most recently joined/created site, so every
     // call to createLocalEvent() here was silently hiding all previously
     // created rooms behind a fresh, unrelated site.
-    final existingSite = await ref.read(joinRepositoryProvider).activeManifest();
+    final existingSite = await ref
+        .read(joinRepositoryProvider)
+        .activeManifest();
     if (!mounted) return;
     if (existingSite != null) {
       Navigator.of(
@@ -1004,6 +1051,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         ref.read(meshBridgeClientProvider) ??
         MeshBridgeClient(ref.read(databaseProvider));
     _bridgeClient!.onOriginForward = _onOriginForward;
+    _bridgeClient!.onSosDelivery = _onSosDeliveryEvent;
     ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
     if (!_bridgeClientSiteStarted) {
       final localEphemeralId = _foregroundEphemeralId;
@@ -1019,12 +1067,41 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     _applyGatewaySettings();
   }
 
+  void _onSosDeliveryEvent(SosDeliveryEvent event) {
+    if (!mounted) return;
+    final tracker = _activeSosTracker;
+    if (tracker == null) {
+      if (event.eventId == _preparingSosEventId) {
+        _pendingSosDeliveryEvents.add(event);
+        if (_pendingSosDeliveryEvents.length > 8) {
+          _pendingSosDeliveryEvents.removeAt(0);
+        }
+      }
+      return;
+    }
+    if (tracker.value.eventId != event.eventId &&
+        tracker.value.objectId != event.objectId) {
+      return;
+    }
+    tracker.apply(event);
+    final status = tracker.value;
+    final message = switch (status.phase) {
+      SosDeliveryPhase.queued => 'SOS saved · queued for nearby mesh relay',
+      SosDeliveryPhase.broadcasting =>
+        'SOS broadcasting nearby · awaiting peer acknowledgement',
+      SosDeliveryPhase.confirmed => 'SOS confirmed by a nearby mesh peer',
+      SosDeliveryPhase.failed => 'SOS delivery failed · ${status.detail}',
+      SosDeliveryPhase.saved => 'SOS saved securely on this device',
+    };
+    setState(() => _status = 'MeshSetu\n$message');
+  }
+
   void _onOriginForward(MeshEnvelope envelope, Object? error) {
     if (!mounted || envelope.payloadType != PayloadType.structuredSos) return;
     setState(() {
       _status = error == null
-          ? 'MeshSetu\nP0 SOS sent to mesh + admin dashboard ✓'
-          : 'MeshSetu\nP0 SOS sent to mesh · admin forwarding unavailable';
+          ? 'MeshSetu\nP0 SOS uploaded to admin dashboard · mesh delivery still pending'
+          : 'MeshSetu\nP0 SOS queued for mesh · admin forwarding unavailable';
     });
   }
 
@@ -1083,6 +1160,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     unawaited(_typedSosGestureSubscription?.cancel());
     unawaited(_bridgeClient?.dispose());
+    _activeSosTracker?.dispose();
+    _activeSosTracker = null;
+    _preparingSosEventId = null;
+    _pendingSosDeliveryEvents.clear();
     unawaited(_sttRecorder.dispose());
     _adminServerController.dispose();
     _gatewayKeyController.dispose();
@@ -1204,8 +1285,7 @@ class _DescribeSosSheetState extends State<_DescribeSosSheet> {
           ),
           const SizedBox(height: 12),
           FilledButton(
-            onPressed: () =>
-                Navigator.of(context).pop(_controller.text.trim()),
+            onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
             child: const Text('Save details'),
           ),
         ],

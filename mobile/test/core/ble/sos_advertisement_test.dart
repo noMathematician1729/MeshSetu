@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshsetu_mobile/core/ble/ble_discovery.dart';
 import 'package:meshsetu_mobile/core/ble/sos_advertisement.dart';
 
 void main() {
@@ -51,5 +52,12 @@ void main() {
       SosEmergencyType.fire,
     );
     expect(MeshSosAdvertisement.flagsFor(SosEmergencyType.medical), 0x13);
+  });
+
+  test('compact SOS campaign spans the scanner idle window', () {
+    expect(
+      MeshAdvertiser.compactSosBroadcastDuration,
+      greaterThanOrEqualTo(const Duration(seconds: 20)),
+    );
   });
 }
