@@ -124,6 +124,19 @@ class MeshDatabase extends _$MeshDatabase {
   Future<void> insertInbox(InboxEventsCompanion row) =>
       into(inboxEvents).insertOnConflictUpdate(row);
 
+  /// Locally authored SOS rows that have been finalized (payload and object
+  /// ID assigned) and are therefore eligible for upload to the control room.
+  /// Delivery to the admin backend is independent of mesh custody: a row with
+  /// no peer to relay through still needs to reach the dashboard as soon as
+  /// this device has internet.
+  Future<List<OutboxEvent>> finalizedSosEvents() =>
+      (select(outboxEvents)..where(
+            (t) =>
+                t.payloadType.equals('structuredSos') &
+                t.state.isNotValue('created'),
+          ))
+          .get();
+
   Future<SiteManifest?> currentSite() async {
     final rows = await (select(
       siteManifests,

@@ -84,7 +84,7 @@ void main() {
   });
 
   test(
-    'advertising moves discovery metadata to Android scan response',
+    'advertising keeps the discovery record in the primary advertisement',
     () async {
       final peripheral = _AdvertisingPeripheral();
       UniversalBlePeripheral.setInstance(peripheral);
@@ -101,16 +101,23 @@ void main() {
           capabilities: 1,
         ),
       );
+      // A scanner cannot connect to a peer without its connection token, and
+      // many OEM stacks never hand the scan response to the scanning app, so
+      // the discovery record must ride the primary advertisement while the
+      // 128-bit service UUID moves to the scan response.
       expect(
         peripheral.config?.android?.addManufacturerDataInScanResponse,
-        isTrue,
+        isFalse,
       );
-      expect(peripheral.config?.android?.addServicesInScanResponse, isNull);
+      expect(peripheral.config?.android?.addServicesInScanResponse, isTrue);
       expect(peripheral.manufacturerData?.companyId, MeshGatt.manufacturerId);
       expect(
         peripheral.manufacturerData?.payload.first,
         MeshGatt.discoveryPayloadType,
       );
+      // Primary packet budget: flags (3) + manufacturer data
+      // (2 header + 2 company ID + payload) must stay within 31 bytes.
+      expect(3 + 4 + peripheral.manufacturerData!.payload.length, 22);
     },
   );
 

@@ -12,14 +12,27 @@ import '../voice/voice_repository.dart';
 /// dashboard URL over local Wi-Fi. The Node backend independently verifies
 /// and decrypts the packet; the gateway never supplies trusted SOS fields.
 class GatewayBridge {
-  GatewayBridge({required this.baseUrl, required this.demoKey});
+  GatewayBridge({
+    required this.baseUrl,
+    required this.demoKey,
+    http.Client? client,
+  }) : _client = client ?? http.Client();
 
   final Uri baseUrl;
   final String demoKey;
 
+  /// Injectable so delivery/retry behavior can be tested without a network.
+  final http.Client _client;
+
+  /// Emergency uploads run against a control room that may be cold-starting
+  /// (free hosting tiers spin down after idle periods and can take ~30 s to
+  /// answer the first request). A 12-second budget silently failed every
+  /// first SOS after an idle period, so allow a full cold start.
+  static const Duration requestTimeout = Duration(seconds: 45);
+
   Future<void> postToDashboard(Map<String, Object?> event) async {
     final uri = baseUrl.resolve('/api/events');
-    final response = await http
+    final response = await _client
         .post(
           uri,
           headers: {
@@ -28,11 +41,73 @@ class GatewayBridge {
           },
           body: jsonEncode(event),
         )
-        .timeout(const Duration(seconds: 12));
+        .timeout(requestTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('dashboard HTTP ${response.statusCode}');
     }
   }
+
+  /// Plaintext SOS upload for the phone that authored the alert.
+  ///
+  /// The encrypted [postEncryptedObject] path stays the preferred, verifiable
+  /// route. This one exists because the origin device already holds the
+  /// decoded payload: when it has internet, the control room must receive the
+  /// emergency even if the mesh never found a peer to take custody. The
+  /// server upserts by `event_id`, so retries and a later encrypted delivery
+  /// converge on a single incident rather than duplicating it.
+  Future<void> postRelaySos({
+    required Map<String, Object?> event,
+    String? relayDeviceId,
+  }) async {
+    final response = await _client
+        .post(
+          baseUrl.resolve('/v1/gateway/relay-sos'),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({
+            'event': event,
+            if (relayDeviceId != null) 'relay_device_id': relayDeviceId,
+          }),
+        )
+        .timeout(requestTimeout);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError(
+        'relay SOS HTTP ${response.statusCode}: ${response.body}',
+      );
+    }
+  }
+
+  /// Bible §15.4 dashboard fields for an SOS this device authored, built
+  /// from the durable outbox row rather than a reassembled mesh envelope.
+  Map<String, Object?> originEventJson({
+    required String eventId,
+    required int objectId,
+    required String siteId,
+    required String roomId,
+    required StructuredSosPayload sos,
+    required int createdAtMs,
+    required int expiresAtMs,
+  }) => {
+    'event_id': eventId,
+    'object_id': objectId.toString(),
+    'site_id': siteId,
+    'room_id': roomId,
+    'priority': sos.triagePriority.name,
+    'incident_type': sos.incidentType,
+    'transcript': sos.transcript.isEmpty ? null : sos.transcript,
+    'zone': sos.logicalZone.isEmpty ? null : sos.logicalZone,
+    'latitude': sos.latitude,
+    'longitude': sos.longitude,
+    'accuracy_m': sos.accuracyM,
+    'location_captured_at_ms': sos.locationCapturedAtMs,
+    'hops': 0,
+    'relay_latency_ms': 0,
+    'created_at_ms': createdAtMs,
+    'expires_at_ms': expiresAtMs,
+    'reporter_uid': sos.reporter?.reporterUid,
+  };
 
   Future<void> postEncryptedObject({
     required String siteId,
@@ -41,7 +116,7 @@ class GatewayBridge {
     required int receivedAtMs,
     String? peerId,
   }) async {
-    final response = await http
+    final response = await _client
         .post(
           baseUrl.resolve('/v1/gateway/objects'),
           headers: {
@@ -56,7 +131,7 @@ class GatewayBridge {
             'peer_id': peerId,
           }),
         )
-        .timeout(const Duration(seconds: 12));
+        .timeout(requestTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('dashboard packet HTTP ${response.statusCode}');
     }
@@ -119,7 +194,7 @@ class GatewayBridge {
   /// UID→profile resolution works when only a compact BLE alert is received.
   Future<bool> registerProfile(Map<String, Object?> profile) async {
     try {
-      final response = await http
+      final response = await _client
           .post(
             baseUrl.resolve('/v1/profiles'),
             headers: {
@@ -128,7 +203,7 @@ class GatewayBridge {
             },
             body: jsonEncode(profile),
           )
-          .timeout(const Duration(seconds: 12));
+          .timeout(requestTimeout);
       return response.statusCode >= 200 && response.statusCode < 300;
     } catch (_) {
       return false;
@@ -152,7 +227,7 @@ class GatewayBridge {
     int? locationCapturedAtMs,
   }) async {
     try {
-      final response = await http
+      final response = await _client
           .post(
             baseUrl.resolve('/v1/gateway/ceal-sos'),
             headers: {
@@ -172,7 +247,7 @@ class GatewayBridge {
               'received_at_ms': DateTime.now().millisecondsSinceEpoch,
             }),
           )
-          .timeout(const Duration(seconds: 12));
+          .timeout(requestTimeout);
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final decoded = jsonDecode(response.body);
         return (
@@ -192,11 +267,11 @@ class GatewayBridge {
   /// SOS notifications and does not require operator credentials.
   Future<Map<String, Object?>?> fetchPublicIncident(String eventId) async {
     try {
-      final response = await http
+      final response = await _client
           .get(
             baseUrl.resolve('/v1/public/sos/${Uri.encodeComponent(eventId)}'),
           )
-          .timeout(const Duration(seconds: 12));
+          .timeout(requestTimeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return null;
       }
@@ -212,9 +287,9 @@ class GatewayBridge {
     String recipientUid,
   ) async {
     try {
-      final response = await http
+      final response = await _client
           .get(baseUrl.resolve('/v1/notifications/$recipientUid'))
-          .timeout(const Duration(seconds: 12));
+          .timeout(requestTimeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return const [];
       }

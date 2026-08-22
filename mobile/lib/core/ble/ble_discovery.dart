@@ -44,7 +44,6 @@ abstract final class MeshAdvertiser {
     try {
       await UniversalBlePeripheral.startAdvertising(
         services: const [MeshGatt.service],
-        localName: 'MeshSetu',
         manufacturerData: ManufacturerData(
           MeshGatt.manufacturerId,
           MeshGatt.manufacturerPayload(
@@ -52,12 +51,22 @@ abstract final class MeshAdvertiser {
             metadata.encode(),
           ),
         ),
-        // Keep the 128-bit service UUID in the primary advertisement for the
-        // scan filter and move the 14-byte discovery record to the scan
-        // response so both packets stay within Android's 31-byte limit.
+        // The scanner needs the 14-byte discovery record to learn a peer's
+        // connection token, so it must ride the *primary* advertisement:
+        // many OEM Android stacks never deliver the scan-response packet to
+        // a scanning app, which previously left every peer visible as
+        // "service UUID only" and therefore unconnectable. The 128-bit
+        // service UUID moves to the scan response instead — it is only a
+        // secondary hint, since scanning matches on manufacturer data.
+        //
+        // Primary budget: flags (3) + manufacturer data (2 + 2 + 1 + 14) =
+        // 22 of 31 bytes. Scan response: service UUID (2 + 16) = 18 bytes.
+        // The local name is deliberately omitted; including it overflowed
+        // the primary packet and renamed the whole Bluetooth adapter.
         platformConfig: PeripheralPlatformConfig(
           android: PeripheralAndroidOptions(
-            addManufacturerDataInScanResponse: true,
+            addManufacturerDataInScanResponse: false,
+            addServicesInScanResponse: true,
           ),
         ),
       );
@@ -146,14 +155,19 @@ abstract final class MeshAdvertiser {
     try {
       await UniversalBlePeripheral.startAdvertising(
         services: const [MeshGatt.service],
-        localName: 'MeshSetu',
         manufacturerData: ManufacturerData(
           MeshGatt.manufacturerId,
           MeshGatt.manufacturerPayload(MeshGatt.sosPayloadType, alert.encode()),
         ),
+        // Same reasoning as [start]: the 20-byte compact alert must ride the
+        // primary advertisement, because a receiver that never gets the scan
+        // response would otherwise never see the SOS at all.
+        // Primary budget: flags (3) + manufacturer data (2 + 2 + 1 + 20) =
+        // 28 of 31 bytes.
         platformConfig: PeripheralPlatformConfig(
           android: PeripheralAndroidOptions(
-            addManufacturerDataInScanResponse: true,
+            addManufacturerDataInScanResponse: false,
+            addServicesInScanResponse: true,
           ),
         ),
       );

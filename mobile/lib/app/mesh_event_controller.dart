@@ -124,10 +124,16 @@ class MeshEventController {
 
   /// Consecutive scan cycles a device must be seen as UUID-only (service
   /// UUID matched, no decodable discovery record) before it becomes a
-  /// fallback connection candidate (Bible audit Task 4). Requiring repeat
-  /// sightings avoids treating a single transient scan-response miss as a
-  /// broken peer.
-  static const int _uuidOnlyFallbackThreshold = 2;
+  /// fallback connection candidate (Bible audit Task 4).
+  ///
+  /// One sighting is enough: the discovery record now rides the primary
+  /// advertisement, so a UUID-only sighting means the peer is either running
+  /// an older build or its manufacturer data was genuinely dropped. Waiting
+  /// for a second cycle previously cost 40+ seconds before the pair could
+  /// link, and the counter resets whenever a peer misses a single cycle.
+  /// Site identity is still established by the post-connection HELLO
+  /// handshake, so an early dial cannot bypass verification.
+  static const int _uuidOnlyFallbackThreshold = 1;
 
   /// How long to wait for the peer designated as initiator by
   /// [shouldInitiate] to dial before this device dials anyway (Bible audit

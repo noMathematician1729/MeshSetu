@@ -110,6 +110,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
     unawaited(_refreshGestureServiceState());
+    // Retry any durable SOS rows as soon as the app opens, even if BLE/event
+    // mode is unavailable on this phone.
+    _ensureAdminDeliveryBridge();
     unawaited(_restoreOrStartEventMode());
   }
 
@@ -762,6 +765,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         await repo.attachLocation(eventId, location);
       }
       await repo.finalizeAndEnqueue(eventId);
+      // The admin route is independent of BLE custody; attach it before
+      // starting relay so Wi-Fi delivery cannot be delayed by mesh startup.
+      _ensureAdminDeliveryBridge();
       final row =
           await (ref
                   .read(databaseProvider)
@@ -1080,14 +1086,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
 
   bool _bridgeClientSiteStarted = false;
 
-  Future<MeshBridgeClient?> _prepareBridgeForSite(String siteId) async {
-    if (!mounted) return null;
+  /// Attach the internet delivery path even when the BLE foreground service
+  /// is unavailable. Admin delivery must not depend on a peer or an ephemeral
+  /// mesh identity being ready.
+  void _ensureAdminDeliveryBridge() {
     _bridgeClient ??=
         ref.read(meshBridgeClientProvider) ??
         MeshBridgeClient(ref.read(databaseProvider));
     _bridgeClient!.onOriginForward = _onOriginForward;
     _bridgeClient!.onSosDelivery = _onSosDeliveryEvent;
     ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
+    _applyGatewaySettings();
+  }
+
+  Future<MeshBridgeClient?> _prepareBridgeForSite(String siteId) async {
+    if (!mounted) return null;
+    _ensureAdminDeliveryBridge();
     _bridgeClient!.prepareForSite(siteId: siteId);
     await _configureForegroundMeshSite(siteId);
     _applyGatewaySettings();

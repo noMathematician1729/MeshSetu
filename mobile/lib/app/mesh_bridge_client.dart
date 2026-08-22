@@ -159,6 +159,19 @@ class MeshBridgeClient {
   final Set<int> _storedObjectIds = {};
   final Set<int> _forwardedObjectIds = {};
   final Set<int> _forwardingObjectIds = {};
+
+  /// Encrypted packets for SOS objects this device authored, held until the
+  /// control room accepts them. Keyed by object ID so a retry cannot upload
+  /// the same object twice concurrently.
+  final Map<int, ({MeshEnvelope envelope, List<int> packet})>
+  _pendingOriginForwards = {};
+
+  /// Event IDs the control room has already accepted in this session, so the
+  /// retry sweep does not re-upload settled emergencies on every tick.
+  final Set<String> _adminDeliveredEventIds = {};
+  Timer? _adminDeliveryTimer;
+  bool _deliveringToAdmin = false;
+  bool _adminDeliveryRerunRequested = false;
   Timer? _inboxSyncTimer;
   bool _syncingInbox = false;
   String? _reporterUid;
@@ -214,7 +227,16 @@ class MeshBridgeClient {
   GatewayBridge? get gatewayBridge => _gatewayBridge;
   set gatewayBridge(GatewayBridge? bridge) {
     _gatewayBridge = bridge;
-    if (bridge != null) unawaited(_syncRelayInbox());
+    if (bridge == null) {
+      _adminDeliveryTimer?.cancel();
+      _adminDeliveryTimer = null;
+      return;
+    }
+    unawaited(_syncRelayInbox());
+    // Attaching the gateway is the trigger for anything queued while this
+    // device had no admin route configured.
+    _ensureAdminDeliveryTimer();
+    unawaited(_deliverToAdmin());
   }
 
   void start({required String siteId, required int localEphemeralId}) {
@@ -522,17 +544,19 @@ class MeshBridgeClient {
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
         final encryptedBytes = data['encryptedBytes'];
-        if (envelopeJson is! Map ||
-            encryptedBytes is! String ||
-            _gatewayBridge == null) {
-          return;
-        }
-        unawaited(
-          _forwardOriginSos(
-            MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
-            base64Decode(encryptedBytes),
-          ),
+        if (envelopeJson is! Map || encryptedBytes is! String) return;
+        final envelope = MeshBridge.envelopeFromJson(
+          envelopeJson.cast<Object?, Object?>(),
         );
+        // Queue first, forward second. This message is a one-shot delivery
+        // from the foreground task: dropping it because the gateway was not
+        // attached yet (or the network was momentarily down) previously meant
+        // the control room never learned about the emergency at all.
+        _pendingOriginForwards[envelope.objectId] = (
+          envelope: envelope,
+          packet: base64Decode(encryptedBytes),
+        );
+        unawaited(_deliverToAdmin());
       case 'error' || 'stopped':
         _updateMeshStatus((_) => MeshStatus.stopped);
         _failPendingSubmissions(
@@ -541,29 +565,110 @@ class MeshBridgeClient {
     }
   }
 
-  Future<void> _forwardOriginSos(
-    MeshEnvelope envelope,
-    List<int> encryptedBytes,
-  ) async {
+  /// Pushes every locally authored SOS to the control room and keeps trying
+  /// until one of the two upload routes succeeds.
+  ///
+  /// Two routes exist on purpose:
+  /// 1. the encrypted packet (`/v1/gateway/objects`), which the backend
+  ///    verifies and decrypts itself — preferred, because delivery is
+  ///    cryptographically attributable;
+  /// 2. the plaintext outbox projection (`/v1/gateway/relay-sos`), used when
+  ///    no encrypted packet is available on this isolate (event mode was not
+  ///    running when the SOS was written, or the app restarted) or when the
+  ///    encrypted upload is rejected.
+  ///
+  /// Mesh custody and admin delivery are independent: an SOS that never found
+  /// a Bluetooth peer must still reach the control room the moment this phone
+  /// has internet. The backend upserts by `event_id` and de-duplicates
+  /// notification/SMS fan-out per event, so retrying is safe.
+  Future<void> _deliverToAdmin() async {
     final bridge = _gatewayBridge;
-    if (bridge == null ||
-        (envelope.payloadType != PayloadType.structuredSos &&
-            envelope.payloadType != PayloadType.voiceObject)) {
+    if (bridge == null) return;
+    if (_deliveringToAdmin) {
+      // A pass is already in flight; make sure whatever was just queued is
+      // picked up instead of waiting for the next retry tick.
+      _adminDeliveryRerunRequested = true;
       return;
     }
+    _deliveringToAdmin = true;
     try {
-      await bridge.postEncryptedObject(
-        siteId: envelope.siteId,
-        objectId: envelope.objectId,
-        packet: encryptedBytes,
-        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
-        peerId: 'origin',
-      );
-      onOriginForward?.call(envelope, null);
-    } catch (error) {
-      onOriginForward?.call(envelope, error);
-      // Relay delivery can still carry this object to another gateway.
+      do {
+        _adminDeliveryRerunRequested = false;
+        await _deliverPendingOriginPackets(bridge);
+        await _deliverOutboxSosToAdmin(bridge);
+      } while (_adminDeliveryRerunRequested);
+    } finally {
+      _deliveringToAdmin = false;
     }
+  }
+
+  Future<void> _deliverPendingOriginPackets(GatewayBridge bridge) async {
+    for (final entry in _pendingOriginForwards.entries.toList()) {
+      final envelope = entry.value.envelope;
+      if (envelope.payloadType != PayloadType.structuredSos &&
+          envelope.payloadType != PayloadType.voiceObject) {
+        _pendingOriginForwards.remove(entry.key);
+        continue;
+      }
+      try {
+        await bridge.postEncryptedObject(
+          siteId: envelope.siteId,
+          objectId: envelope.objectId,
+          packet: entry.value.packet,
+          receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+          peerId: 'origin',
+        );
+        _pendingOriginForwards.remove(entry.key);
+        _adminDeliveredEventIds.add(envelope.eventId);
+        onOriginForward?.call(envelope, null);
+      } catch (error) {
+        // Keep the packet queued for the next retry tick. The plaintext
+        // projection below still runs, so a packet the backend cannot
+        // decrypt does not block the emergency from surfacing.
+        onOriginForward?.call(envelope, error);
+      }
+    }
+  }
+
+  /// Plaintext backstop for SOS rows this device authored that the control
+  /// room has not accepted yet in this session.
+  Future<void> _deliverOutboxSosToAdmin(GatewayBridge bridge) async {
+    final rows = await _db.finalizedSosEvents();
+    for (final row in rows) {
+      final objectId = row.objectId;
+      final payload = row.payload;
+      if (objectId == null ||
+          payload == null ||
+          _adminDeliveredEventIds.contains(row.eventId)) {
+        continue;
+      }
+      try {
+        await bridge.postRelaySos(
+          event: bridge.originEventJson(
+            eventId: row.eventId,
+            objectId: objectId,
+            siteId: row.siteId,
+            roomId: row.roomId,
+            sos: StructuredSosPayload.decode(payload),
+            createdAtMs: row.createdAtMs,
+            expiresAtMs: row.expiresAtMs,
+          ),
+        );
+        _adminDeliveredEventIds.add(row.eventId);
+      } catch (_) {
+        // Retried on the next tick; the mesh route stays unaffected.
+      }
+    }
+  }
+
+  /// Retries admin delivery while the app is running, so an SOS queued with
+  /// no connectivity is uploaded as soon as Wi-Fi or mobile data returns.
+  void _ensureAdminDeliveryTimer() {
+    if (_adminDeliveryTimer != null || _gatewayBridge == null) return;
+    _adminDeliveryTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_deliverToAdmin()),
+    );
   }
 
   /// Delivers alerts the backend addressed to this account because the sender
@@ -767,6 +872,8 @@ class MeshBridgeClient {
   Future<void> dispose() async {
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
+    _adminDeliveryTimer?.cancel();
+    _adminDeliveryTimer = null;
     _contactNotificationTimer?.cancel();
     _contactNotificationTimer = null;
     if (_listening) {
@@ -781,6 +888,8 @@ class MeshBridgeClient {
     _storedObjectIds.clear();
     _forwardedObjectIds.clear();
     _forwardingObjectIds.clear();
+    _pendingOriginForwards.clear();
+    _adminDeliveredEventIds.clear();
     _sosEventIds.clear();
     _meshStatus = MeshStatus.stopped;
     await _meshStatusController.close();
