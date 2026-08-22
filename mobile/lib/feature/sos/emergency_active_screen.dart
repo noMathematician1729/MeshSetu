@@ -27,6 +27,8 @@ class EmergencyActiveScreen extends ConsumerWidget {
     required this.meshActive,
     this.eventId,
     this.delivery,
+    this.meshStatusStream,
+    this.initialMeshStatus,
   });
 
   final String locationStatus;
@@ -37,16 +39,37 @@ class EmergencyActiveScreen extends ConsumerWidget {
   /// mesh custody acknowledgement, not confirmed admin-backend delivery.
   final ValueListenable<SosDeliveryStatus>? delivery;
 
+  /// Optional mesh-health projection used to distinguish a blocked/stopped
+  /// relay from a running mesh that simply has no peer in range yet.
+  final Stream<MeshStatus>? meshStatusStream;
+  final MeshStatus? initialMeshStatus;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final meshStatus = ref.watch(meshStatusProvider);
-    final listenable = delivery;
-    if (listenable == null) {
-      return _build(context, meshStatus, null);
+    final providerStatus = ref.watch(meshStatusProvider);
+
+    Widget content(SosDeliveryStatus? status) {
+      Widget buildWithStatus(AsyncValue<MeshStatus> health) =>
+          _build(context, health, status);
+      final stream = meshStatusStream;
+      if (stream == null) return buildWithStatus(providerStatus);
+      return StreamBuilder<MeshStatus>(
+        stream: stream,
+        initialData: initialMeshStatus,
+        builder: (context, snapshot) {
+          final health = snapshot.hasData
+              ? AsyncData<MeshStatus>(snapshot.data!)
+              : providerStatus;
+          return buildWithStatus(health);
+        },
+      );
     }
+
+    final listenable = delivery;
+    if (listenable == null) return content(null);
     return ValueListenableBuilder<SosDeliveryStatus>(
       valueListenable: listenable,
-      builder: (context, status, _) => _build(context, meshStatus, status),
+      builder: (context, status, _) => content(status),
     );
   }
 
@@ -56,18 +79,39 @@ class EmergencyActiveScreen extends ConsumerWidget {
     SosDeliveryStatus? deliveryStatus,
   ) {
     final palette = MeshPalette.of(context);
+    final legacy = deliveryStatus == null;
+    final health = meshStatus.asData?.value ?? initialMeshStatus;
     final confirmed = deliveryStatus?.isRemoteConfirmed ?? false;
-    final headline = deliveryStatus == null
+    final phase = deliveryStatus?.phase;
+    final meshRunning = health?.eventModeRunning ?? meshActive;
+    final relayBlocked =
+        !legacy && !meshRunning && health?.blockedReason != null;
+    final waitingForPeer =
+        !legacy &&
+        health != null &&
+        meshRunning &&
+        health.peerCount == 0 &&
+        phase != SosDeliveryPhase.confirmed;
+    final headline = legacy
         ? 'Emergency Active'
         : confirmed
         ? 'Emergency mesh delivery confirmed'
+        : phase == SosDeliveryPhase.failed
+        ? 'SOS saved · mesh relay unavailable'
+        : relayBlocked
+        ? 'SOS saved · mesh relay blocked'
         : 'SOS saved · mesh relay pending';
-    final subhead = deliveryStatus == null
+    final subhead = legacy
         ? 'Help is on the way'
         : confirmed
         ? 'A nearby device has accepted custody of your SOS'
+        : relayBlocked
+        ? health!.blockedReason!
+        : phase == SosDeliveryPhase.failed
+        ? 'The encrypted packet remains on this device; retry Event Mode when available'
+        : waitingForPeer
+        ? 'Mesh is running; waiting for a nearby peer to accept the packet'
         : 'The packet is safe on this device; delivery is not confirmed yet';
-
     return MeshPage(
       title: 'Emergency Active',
       child: Column(

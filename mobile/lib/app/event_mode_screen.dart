@@ -612,7 +612,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     );
   }
 
-  Future<void> _startEventMode() async {
+  Future<EventModeLaunchResult> _startEventMode({String? siteId}) async {
     if (await FlutterForegroundTask.isRunningService) {
       if (mounted) {
         setState(() {
@@ -620,7 +620,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
         });
       }
-      return;
+      return EventModeLaunchResult.alreadyRunning;
     }
     if (mounted) {
       setState(() => _status = 'MeshSetu\nStarting BLE relay service');
@@ -628,11 +628,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final result = await EventModeLauncher.start(
       taskCallback: meshEventTaskCallback,
       onStatus: (message) {
+        _bridgeClient?.reportBlockedReason(message);
         if (mounted) setState(() => _status = 'MeshSetu\n$message');
       },
-      onMeshSiteConfigurationNeeded: _saveActiveMeshConfiguration,
+      onMeshSiteConfigurationNeeded: siteId == null
+          ? _saveActiveMeshConfiguration
+          : () => EventModeLauncher.configureMeshSite(siteId),
     );
-    if (!mounted) return;
+    if (!mounted) return result;
     switch (result) {
       case EventModeLaunchResult.alreadyRunning:
       case EventModeLaunchResult.started:
@@ -643,6 +646,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       case EventModeLaunchResult.failure:
         break;
     }
+    return result;
   }
 
   Future<void> _stopEventMode() async {
@@ -693,11 +697,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   Future<void> _describeSos() async {
-    final value = await showModalBottomSheet<String>(
+    final value = await showDialog<String>(
       context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => _DescribeSosSheet(initialText: _sosDescription),
+      useRootNavigator: true,
+      builder: (_) => Dialog(
+        insetPadding: const EdgeInsets.all(20),
+        child: _DescribeSosSheet(initialText: _sosDescription),
+      ),
     );
     if (value != null && mounted) setState(() => _sosDescription = value);
   }
@@ -727,13 +733,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     });
     try {
       final site = await ref.read(joinRepositoryProvider).activeManifest();
+      final siteId = site?.siteId ?? MeshEventController.demoSiteId;
+      final roomId = site?.rooms.isNotEmpty == true
+          ? site!.rooms.first.roomId
+          : 'public';
       final repo = ref.read(sosRepositoryProvider);
       final eventId = await repo.createDraft(
         SosInput(
-          siteId: site?.siteId ?? MeshEventController.demoSiteId,
-          roomId: site?.rooms.isNotEmpty == true
-              ? site!.rooms.first.roomId
-              : 'public',
+          siteId: siteId,
+          roomId: roomId,
           inputMode: InputMode.tap,
           rawText: _sosDescription,
           priority: PriorityBand.p0Critical,
@@ -780,6 +788,20 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         tracker.apply(event);
       }
       _pendingSosDeliveryEvents.clear();
+      final launchResult = await _ensureSosRelay(siteId);
+      if (launchResult == EventModeLaunchResult.failure) {
+        final detail =
+            _bridgeClient?.meshStatus.blockedReason ??
+            'Event Mode could not start. Start it manually and retry relay.';
+        tracker.apply(
+          SosDeliveryEvent(
+            kind: SosDeliveryEventKind.failed,
+            objectId: objectId,
+            eventId: eventId,
+            detail: detail,
+          ),
+        );
+      }
       _preparingSosEventId = null;
       if (mounted) {
         final adminForwardingConfigured =
@@ -799,6 +821,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               locationStatus: locationResult.status,
               meshActive: _eventModeActive,
               delivery: tracker,
+              meshStatusStream: _bridgeClient?.meshStatusStream,
+              initialMeshStatus: _bridgeClient?.meshStatus,
             ),
           ),
         );
@@ -1056,28 +1080,48 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
 
   bool _bridgeClientSiteStarted = false;
 
-  Future<void> _startBridgeForActiveSite() async {
-    final site = await ref.read(joinRepositoryProvider).activeManifest();
-    if (!mounted || !_eventModeActive) return;
-    await _configureForegroundMeshSite(site?.siteId);
+  Future<MeshBridgeClient?> _prepareBridgeForSite(String siteId) async {
+    if (!mounted) return null;
     _bridgeClient ??=
         ref.read(meshBridgeClientProvider) ??
         MeshBridgeClient(ref.read(databaseProvider));
     _bridgeClient!.onOriginForward = _onOriginForward;
     _bridgeClient!.onSosDelivery = _onSosDeliveryEvent;
     ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
+    _bridgeClient!.prepareForSite(siteId: siteId);
+    await _configureForegroundMeshSite(siteId);
+    _applyGatewaySettings();
+    return _bridgeClient;
+  }
+
+  Future<void> _startBridgeForActiveSite({String? requestedSiteId}) async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    final siteId =
+        requestedSiteId ?? site?.siteId ?? MeshEventController.demoSiteId;
+    if (!mounted) return;
+    await _prepareBridgeForSite(siteId);
+    if (!mounted || !_eventModeActive) return;
     if (!_bridgeClientSiteStarted) {
       final localEphemeralId = _foregroundEphemeralId;
-      if (localEphemeralId == null) return;
-      _bridgeClient!.start(
-        siteId: site?.siteId ?? MeshEventController.demoSiteId,
-        localEphemeralId: localEphemeralId,
-      );
+      if (localEphemeralId == null) {
+        _bridgeClient?.requestForegroundIdentity();
+        return;
+      }
+      _bridgeClient!.start(siteId: siteId, localEphemeralId: localEphemeralId);
       _bridgeClientSiteStarted = true;
-    } else if (site != null) {
-      _bridgeClient!.setSiteId(site.siteId);
+    } else {
+      _bridgeClient!.setSiteId(siteId);
     }
-    _applyGatewaySettings();
+  }
+
+  Future<EventModeLaunchResult> _ensureSosRelay(String siteId) async {
+    await _prepareBridgeForSite(siteId);
+    final result = await _startEventMode(siteId: siteId);
+    if (result != EventModeLaunchResult.failure) {
+      await _startBridgeForActiveSite(requestedSiteId: siteId);
+      _bridgeClient?.requestForegroundIdentity();
+    }
+    return result;
   }
 
   void _onSosDeliveryEvent(SosDeliveryEvent event) {

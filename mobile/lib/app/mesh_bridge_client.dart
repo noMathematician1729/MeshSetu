@@ -59,6 +59,8 @@ class MeshPeerSnapshot {
   }
 }
 
+const outboxMaxAttempts = 5;
+
 /// Snapshot of the foreground mesh service's connectivity, observable from
 /// the UI isolate without polling. Room screens use this as the primary
 /// delivery signal instead of the internet-only [RoomPresenceSocket] status
@@ -274,11 +276,25 @@ class MeshBridgeClient {
     final siteId = _siteId;
     final localEphemeralId = _localEphemeralId;
     if (siteId == null || localEphemeralId == null) return;
+    // Site changes can queue multiple asynchronous restarts. Do not install
+    // an older sender after a newer site has already been selected.
+    if (siteId != _siteId || localEphemeralId != _localEphemeralId) return;
     _outbox = OutboxSender(
       _db,
       _sendToMesh,
       siteId: siteId,
       localEphemeralId: localEphemeralId,
+      onDeliveryFailure: (row, error) {
+        unawaited(
+          _emitSosDelivery(
+            kind: SosDeliveryEventKind.failed,
+            objectId: row.objectId ?? 0,
+            eventId: row.eventId,
+            detail:
+                'Mesh submission failed after $outboxMaxAttempts attempts: $error',
+          ),
+        );
+      },
     )..start();
   }
 
@@ -392,6 +408,10 @@ class MeshBridgeClient {
                 : data['reason'] as String? ??
                       'Foreground mesh rejected the SOS.',
           ),
+        );
+        unawaited(
+          _outbox?.onSubmissionResult(objectId, accepted: accepted) ??
+              Future<void>.value(),
         );
         final pending = _pendingSubmissions[objectId];
         if (pending == null || pending.isCompleted) return;

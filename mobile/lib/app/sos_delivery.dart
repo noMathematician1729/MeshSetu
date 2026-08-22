@@ -83,6 +83,10 @@ final class SosDeliveryTracker extends ValueNotifier<SosDeliveryStatus> {
 
   void apply(SosDeliveryEvent event) {
     if (event.objectId != value.objectId) return;
+    if (value.phase == SosDeliveryPhase.confirmed &&
+        event.kind != SosDeliveryEventKind.relayConfirmed) {
+      return;
+    }
     final next = switch (event.kind) {
       SosDeliveryEventKind.queued => value.copyWith(
         phase: SosDeliveryPhase.queued,

@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshsetu_mobile/app/mesh_bridge_client.dart';
 import 'package:meshsetu_mobile/app/providers.dart';
+import 'package:meshsetu_mobile/app/sos_delivery.dart';
 import 'package:meshsetu_mobile/core/ble/sos_advertisement.dart';
 import 'package:meshsetu_mobile/core/data/database.dart';
 import 'package:meshsetu_mobile/feature/sos/compact_sos_packet_screen.dart';
@@ -155,6 +158,91 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(milliseconds: 1));
     });
+
+    testWidgets(
+      'distinguishes blocked relay from a running mesh with no peer',
+      (tester) async {
+        final mesh = StreamController<MeshStatus>();
+        addTearDown(mesh.close);
+        final tracker = SosDeliveryTracker(
+          const SosDeliveryStatus(
+            eventId: 'event-health',
+            objectId: 51,
+            phase: SosDeliveryPhase.queued,
+            locationStatus: 'GPS captured',
+          ),
+        );
+        addTearDown(tracker.dispose);
+        await tester.pumpWidget(
+          _wrap(
+            EmergencyActiveScreen(
+              locationStatus: 'GPS captured',
+              meshActive: false,
+              delivery: tracker,
+              initialMeshStatus: const MeshStatus(
+                eventModeRunning: false,
+                peerCount: 0,
+                statusText: 'stopped',
+                blockedReason: 'Turn on Location in Settings.',
+              ),
+              meshStatusStream: mesh.stream,
+            ),
+          ),
+        );
+        expect(find.text('SOS saved · mesh relay blocked'), findsOneWidget);
+        expect(find.text('Turn on Location in Settings.'), findsOneWidget);
+
+        mesh.add(
+          const MeshStatus(
+            eventModeRunning: true,
+            peerCount: 0,
+            statusText: 'scanning',
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Mesh active · waiting for a peer'), findsOneWidget);
+        expect(find.textContaining('No connected mesh peers'), findsOneWidget);
+        expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'shows broadcast degradation without claiming remote delivery',
+      (tester) async {
+        final tracker = SosDeliveryTracker(
+          const SosDeliveryStatus(
+            eventId: 'event-2',
+            objectId: 42,
+            phase: SosDeliveryPhase.queued,
+            locationStatus: 'Location unavailable',
+          ),
+        );
+        addTearDown(tracker.dispose);
+        tracker.apply(
+          const SosDeliveryEvent(
+            kind: SosDeliveryEventKind.broadcastFailed,
+            objectId: 42,
+            detail: 'BLE advertiser rejected the campaign',
+          ),
+        );
+        await tester.pumpWidget(
+          _wrap(
+            EmergencyActiveScreen(
+              locationStatus: 'Location unavailable',
+              meshActive: true,
+              delivery: tracker,
+            ),
+          ),
+        );
+
+        expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
+        expect(
+          find.textContaining('Compact BLE broadcast unavailable'),
+          findsOneWidget,
+        );
+        expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+      },
+    );
 
     testWidgets('return to home pops the screen', (tester) async {
       tester.view

@@ -23,17 +23,25 @@ class OutboxSender {
     this._send, {
     required this.siteId,
     required this.localEphemeralId,
-  });
+    this.maxAttempts = 5,
+    this.retryBaseDelay = const Duration(seconds: 1),
+    this.onDeliveryFailure,
+  }) : assert(maxAttempts > 0),
+       assert(retryBaseDelay > Duration.zero);
 
   final MeshDatabase _db;
   final Future<void> Function(MeshEnvelope envelope) _send;
   final String siteId;
   final int localEphemeralId;
+  final int maxAttempts;
+  final Duration retryBaseDelay;
+  final void Function(OutboxEvent row, Object error)? onDeliveryFailure;
 
   StreamSubscription<List<OutboxEvent>>? _sub;
   final Set<String> _draining = {};
   final Map<String, Timer> _retryTimers = {};
   final Map<String, int> _retryAfterMs = {};
+  final Map<String, int> _attempts = {};
   bool _disposed = false;
 
   void start() {
@@ -70,6 +78,33 @@ class OutboxSender {
       } else if (m.kind == 'expired') {
         await _markByObjectId(objectId, 'expired');
       }
+    }
+  }
+
+  /// Reconciles a foreground acceptance that arrived after the submission
+  /// completer timed out. The row may already have been returned to READY;
+  /// accepting it as RELAYING prevents a duplicate submission while custody
+  /// ACK handling remains unchanged.
+  Future<void> onSubmissionResult(
+    int objectId, {
+    required bool accepted,
+  }) async {
+    if (!accepted) return;
+    final row =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) => t.siteId.equals(siteId) & t.objectId.equals(objectId),
+            ))
+            .getSingleOrNull();
+    if (row == null || row.state == 'acked' || row.state == 'expired') return;
+    _retryAfterMs.remove(row.eventId);
+    _retryTimers.remove(row.eventId)?.cancel();
+    _attempts.remove(row.eventId);
+    if (row.state == 'ready') {
+      await _db.markState(
+        row.eventId,
+        'relaying',
+        DateTime.now().millisecondsSinceEpoch,
+      );
     }
   }
 
@@ -120,15 +155,32 @@ class OutboxSender {
           originEphemeralId: localEphemeralId,
         ),
       );
-    } catch (_) {
-      // Return rejected submissions to READY immediately, but hold the
-      // watcher off for a short backoff so a stopped foreground task cannot
-      // spin the same row through RELAYING continuously.
-      final retryAt = DateTime.now().millisecondsSinceEpoch + 1000;
+      _attempts.remove(row.eventId);
+    } catch (error) {
+      final attempt = (_attempts[row.eventId] ?? 0) + 1;
+      _attempts[row.eventId] = attempt;
+      if (attempt >= maxAttempts) {
+        _attempts.remove(row.eventId);
+        await _db.markState(
+          row.eventId,
+          'failed',
+          DateTime.now().millisecondsSinceEpoch,
+        );
+        onDeliveryFailure?.call(row, error);
+        return;
+      }
+      // Return rejected submissions to READY, but use exponential backoff so
+      // a stopped foreground task cannot spin the same row forever. A later
+      // bridge restart can drain the READY row again because the retry state
+      // is deliberately local to this sender instance.
+      final delay = retryBaseDelay * (1 << (attempt - 1).clamp(0, 4));
+      final retryAt =
+          DateTime.now().millisecondsSinceEpoch + delay.inMilliseconds;
       _retryAfterMs[row.eventId] = retryAt;
       await _db.markState(row.eventId, 'ready', retryAt);
-      final timer = Timer(const Duration(seconds: 1), () async {
+      final timer = Timer(delay, () async {
         if (_disposed) return;
+        _retryTimers.remove(row.eventId);
         _retryAfterMs.remove(row.eventId);
         final current = await (_db.select(
           _db.outboxEvents,
@@ -163,6 +215,7 @@ class OutboxSender {
     }
     _retryTimers.clear();
     _retryAfterMs.clear();
+    _attempts.clear();
     _draining.clear();
   }
 }
