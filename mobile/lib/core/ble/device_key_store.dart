@@ -168,9 +168,37 @@ abstract final class DeviceKeyStore {
   }
 }
 
-/// Development-only bootstrap; production provisioning must supply a signed
-/// manifest key.
+/// Explicit hackathon-only provisioning boundary.
+///
+/// This deterministic value is useful for the local demo because every phone
+/// can derive the same site key, but it is not a trust mechanism. Production
+/// builds must provide an organizer-provisioned key through a separate
+/// integration and must not derive it from a Mesh Code or QR contents.
+abstract final class HackathonProvisioning {
+  static bool get enabled =>
+      kDebugMode ||
+      const bool.fromEnvironment(
+        'MESHSETU_HACKATHON_PROVISIONING',
+        defaultValue: false,
+      );
+
+  static List<int> siteKeyFor(String siteId) {
+    if (!enabled) {
+      throw StateError(
+        'Production builds require an organizer-provisioned site key',
+      );
+    }
+    return sha256
+        .convert(utf8.encode('MeshSetu-demo-site-key-v1:$siteId'))
+        .bytes;
+  }
+
+  static const manifestSigningKey = 'meshsetu-demo-manifest-key-v1';
+}
+
+/// Backwards-compatible name for existing demo-only packet tests.
+@Deprecated('Use HackathonProvisioning.siteKeyFor')
 abstract final class SiteKeyProvisioning {
   static List<int> demoKey(String siteId) =>
-      sha256.convert(utf8.encode('MeshSetu-demo-site-key-v1:$siteId')).bytes;
+      HackathonProvisioning.siteKeyFor(siteId);
 }

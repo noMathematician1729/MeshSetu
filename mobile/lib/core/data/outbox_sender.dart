@@ -40,6 +40,7 @@ class OutboxSender {
     this._send, {
     required this.siteId,
     required this.localEphemeralId,
+    this.recoverRelaying = true,
     this.maxAttempts = 5,
     this.retryBaseDelay = const Duration(seconds: 1),
     this.transportRetryDelay = const Duration(seconds: 5),
@@ -51,6 +52,7 @@ class OutboxSender {
   final Future<void> Function(MeshEnvelope envelope) _send;
   final String siteId;
   final int localEphemeralId;
+  final bool recoverRelaying;
   final int maxAttempts;
   final Duration retryBaseDelay;
 
@@ -72,15 +74,17 @@ class OutboxSender {
   }
 
   Future<void> _recoverAndListen() async {
-    await (_db.update(
-          _db.outboxEvents,
-        )..where((t) => (t.siteId.equals(siteId) & t.state.equals('relaying'))))
-        .write(
-          OutboxEventsCompanion(
-            state: const Value('ready'),
-            updatedAtMs: Value(DateTime.now().millisecondsSinceEpoch),
-          ),
-        );
+    if (recoverRelaying) {
+      await (_db.update(_db.outboxEvents)..where(
+            (t) => (t.siteId.equals(siteId) & t.state.equals('relaying')),
+          ))
+          .write(
+            OutboxEventsCompanion(
+              state: const Value('ready'),
+              updatedAtMs: Value(DateTime.now().millisecondsSinceEpoch),
+            ),
+          );
+    }
     if (_disposed) return;
     _sub = _db.watchReady(siteId).listen((rows) {
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -112,7 +116,7 @@ class OutboxSender {
         await _markByObjectId(
           objectId,
           'acked',
-          fromStates: const {'ready', 'queued', 'relaying'},
+          fromStates: const {'relaying'},
         );
       } else if (m.kind == 'expired') {
         await _markByObjectId(
@@ -125,23 +129,30 @@ class OutboxSender {
   }
 
   /// Reconciles a foreground acceptance that arrived after the submission
-  /// completer timed out. The row may already have been returned to READY;
-  /// accepting it as RELAYING prevents a duplicate submission while custody
-  /// ACK handling remains unchanged.
+  /// completer timed out. The conditional database update is the ownership
+  /// boundary: once the foreground relay has accepted an object, this sender
+  /// must not submit the same object again.
   Future<void> onSubmissionResult(
     int objectId, {
     required bool accepted,
   }) async {
     if (!accepted) return;
-    final row =
+    await _db.markRelayingIfPending(
+      siteId,
+      objectId,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    final rows =
         await (_db.select(_db.outboxEvents)..where(
               (t) => t.siteId.equals(siteId) & t.objectId.equals(objectId),
             ))
-            .getSingleOrNull();
-    if (row == null || row.state == 'acked' || row.state == 'expired') return;
-    _retryAfterMs.remove(row.eventId);
-    _retryTimers.remove(row.eventId)?.cancel();
-    _attempts.remove(row.eventId);
+            .get();
+    for (final row in rows) {
+      if (row.state != 'relaying') continue;
+      _retryAfterMs.remove(row.eventId);
+      _retryTimers.remove(row.eventId)?.cancel();
+      _attempts.remove(row.eventId);
+    }
   }
 
   Future<void> _markByObjectId(
@@ -166,7 +177,8 @@ class OutboxSender {
       final objectId = row.objectId;
       final payload = row.payload;
       if (objectId == null || payload == null) {
-        await _db.markState(
+        await _db.markStateForSite(
+          row.siteId,
           row.eventId,
           'failed',
           DateTime.now().millisecondsSinceEpoch,
@@ -175,9 +187,15 @@ class OutboxSender {
       }
       final now = DateTime.now().millisecondsSinceEpoch;
       if (row.expiresAtMs <= now) {
-        await _db.markState(row.eventId, 'expired', now);
+        await _db.markStateForSite(row.siteId, row.eventId, 'expired', now);
         return;
       }
+      final claimed = await _db.markRelayingIfPending(
+        row.siteId,
+        objectId,
+        now,
+      );
+      if (claimed == 0) return;
       await _send(
         MeshEnvelope(
           objectId: objectId,
@@ -194,11 +212,12 @@ class OutboxSender {
           originEphemeralId: localEphemeralId,
         ),
       );
-      // The foreground coordinator can accept an object into its durable
-      // scheduler with zero peers. Keep that distinction visible as queued;
-      // frames_sent is the transition to genuine peer handoff.
-      await _db.markQueuedIfReady(
-        row.eventId,
+      // Foreground acceptance transfers ownership to the durable relay
+      // scheduler even when no peer is currently connected. Keep the row in
+      // RELAYING until a custody ACK or expiry arrives.
+      await _db.markRelayingIfPending(
+        row.siteId,
+        objectId,
         DateTime.now().millisecondsSinceEpoch,
       );
       _attempts.remove(row.eventId);
@@ -214,7 +233,8 @@ class OutboxSender {
       if (consumesAttempt) _attempts[row.eventId] = attempt;
       if (consumesAttempt && attempt >= maxAttempts) {
         _attempts.remove(row.eventId);
-        await _db.markState(
+        await _db.markStateForSite(
+          row.siteId,
           row.eventId,
           'failed',
           DateTime.now().millisecondsSinceEpoch,
@@ -232,7 +252,7 @@ class OutboxSender {
       final retryAt =
           DateTime.now().millisecondsSinceEpoch + delay.inMilliseconds;
       _retryAfterMs[row.eventId] = retryAt;
-      await _db.markState(row.eventId, 'ready', retryAt);
+      await _db.markStateForSite(row.siteId, row.eventId, 'ready', retryAt);
       final timer = Timer(delay, () async {
         if (_disposed) return;
         _retryTimers.remove(row.eventId);

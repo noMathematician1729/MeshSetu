@@ -60,9 +60,10 @@ fun PeripheralCharacteristic.toGattCharacteristic(): BluetoothGattCharacteristic
 
     addCCDescriptorIfRequired(this, characteristic)
     synchronized(bluetoothGattCharacteristics) {
-        if (bluetoothGattCharacteristics[uuid] == null) {
-            bluetoothGattCharacteristics[uuid] = characteristic
-        }
+        // Services are rebuilt after Event Mode restarts. Retaining a
+        // characteristic from the cleared GATT database makes subsequent
+        // notifications target a stale Android object.
+        bluetoothGattCharacteristics[uuid] = characteristic
     }
     return characteristic
 }
@@ -89,7 +90,8 @@ private fun addCCDescriptorIfRequired(
         UUID.fromString(peripheralDescriptorCCUUID),
         BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
     )
-    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+    // CCCD state is negotiated per central and defaults to disabled.
+    cccd.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
     characteristic.addDescriptor(cccd)
     Log.d("UniversalBlePeripheral", "Added CCCD for ${characteristic.uuid}")
 }

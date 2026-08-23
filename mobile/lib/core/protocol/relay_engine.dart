@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+
 import '../model/model.dart';
 import 'envelope_codec.dart';
 import 'frame.dart';
@@ -78,6 +80,7 @@ class MeshRelayEngine {
     final now = clockMs();
     for (final value in store.pending(now)) {
       _knownObjects[value.objectId] = value;
+      _queuedObjectIds.add(value.objectId);
       this.scheduler.enqueue(value, now);
     }
   }
@@ -96,6 +99,7 @@ class MeshRelayEngine {
   final Map<int, EncryptedObject> _knownObjects = {};
   final Map<(String, int), int> _inFlight = {};
   final Set<int> _acknowledged = {};
+  final Set<int> _queuedObjectIds = {};
   final List<RelayMetric> _metrics = [];
   final List<PersistListener> _listeners = [];
 
@@ -205,8 +209,30 @@ class MeshRelayEngine {
       _partial[key] = buffer;
       _partialCreatedAt[key] = clockMs();
     }
+    if (buffer.hasSequence(frame.sequence)) {
+      _metrics.add(
+        RelayMetric(
+          'duplicate_fragment',
+          objectId: frame.objectId,
+          peerId: peerId,
+        ),
+      );
+      return RelayResult(const [], _drain());
+    }
     try {
-      buffer.add(frame);
+      if (!buffer.add(frame)) {
+        _partial.remove(key);
+        _partialCreatedAt.remove(key);
+        _lastNackAt.remove(key);
+        _metrics.add(
+          RelayMetric(
+            'reassembly_rejected',
+            objectId: frame.objectId,
+            peerId: peerId,
+          ),
+        );
+        return RelayResult(const [], _drain());
+      }
     } catch (_) {
       _partial.remove(key);
       _partialCreatedAt.remove(key);
@@ -267,7 +293,7 @@ class MeshRelayEngine {
       return RelayResult(const [], _drain());
     }
     if (store.contains(envelope.objectId) ||
-        !dedupe.markIfNew(envelope.objectId, envelope.expiresAtMs, now)) {
+        dedupe.contains(envelope.objectId, now)) {
       _metrics.add(
         RelayMetric('duplicate', objectId: envelope.objectId, peerId: peerId),
       );
@@ -286,9 +312,37 @@ class MeshRelayEngine {
       );
       return RelayResult(const [], _drain());
     }
-    _onPersist(envelope, peerId, encrypted.bytes);
+    if (!dedupe.markIfNew(envelope.objectId, envelope.expiresAtMs, now)) {
+      _metrics.add(
+        RelayMetric('duplicate', objectId: envelope.objectId, peerId: peerId),
+      );
+      return RelayResult([_ack(frame.objectId, frame.priority)], _drain());
+    }
+    try {
+      _onPersist(envelope, peerId, encrypted.bytes);
+    } catch (error) {
+      _metrics.add(
+        RelayMetric(
+          'persist_listener_failed',
+          objectId: envelope.objectId,
+          peerId: peerId,
+          detail: '$error',
+        ),
+      );
+    }
     for (final listener in _listeners) {
-      listener(envelope, peerId, encrypted.bytes);
+      try {
+        listener(envelope, peerId, encrypted.bytes);
+      } catch (error) {
+        _metrics.add(
+          RelayMetric(
+            'persist_listener_failed',
+            objectId: envelope.objectId,
+            peerId: peerId,
+            detail: '$error',
+          ),
+        );
+      }
     }
     _metrics.add(
       RelayMetric(
@@ -329,8 +383,7 @@ class MeshRelayEngine {
     return RelayResult([_ack(frame.objectId, frame.priority)], _drain());
   }
 
-  EncryptedObject? nextOutbound({int? nowMs}) =>
-      scheduler.next(nowMs ?? clockMs());
+  EncryptedObject? nextOutbound({int? nowMs}) => _takeNext(nowMs ?? clockMs());
 
   void requeue(EncryptedObject value, {int? nowMs}) =>
       _enqueue(value, nowMs ?? clockMs());
@@ -400,6 +453,11 @@ class MeshRelayEngine {
   }
 
   Future<EncryptedObject> submit(MeshEnvelope envelope, {int? nowMs}) async {
+    if (envelope.siteId != siteId) {
+      throw StateError('cannot submit an object for another site');
+    }
+    final existing = _knownObjects[envelope.objectId];
+    if (existing != null) return existing;
     final encrypted = await crypto.encrypt(envelope);
     _enqueue(encrypted, nowMs ?? clockMs());
     return encrypted;
@@ -408,7 +466,14 @@ class MeshRelayEngine {
   void _enqueue(EncryptedObject value, int nowMs) {
     _knownObjects[value.objectId] = value;
     store.enqueue(value);
+    if (!_queuedObjectIds.add(value.objectId)) return;
     scheduler.enqueue(value, nowMs);
+  }
+
+  EncryptedObject? _takeNext(int nowMs) {
+    final value = scheduler.next(nowMs);
+    if (value != null) _queuedObjectIds.remove(value.objectId);
+    return value;
   }
 
   void _cleanupPartial(int nowMs) {
@@ -470,7 +535,8 @@ const int _maxInt = 0x7FFFFFFFFFFFFFFF;
 /// a `.tmp` file, then rename over the target; rename is atomic on POSIX
 /// filesystems when source/target share a directory).
 class FileRelayStore extends RelayStore {
-  FileRelayStore(this.directory) {
+  FileRelayStore(Directory root, {String? siteId})
+    : directory = siteId == null ? root : scopedDirectory(root, siteId) {
     _inbox.createSync(recursive: true);
     _outbox.createSync(recursive: true);
     _acks.createSync(recursive: true);
@@ -482,18 +548,26 @@ class FileRelayStore extends RelayStore {
   Directory get _outbox => Directory('${directory.path}/outbox');
   Directory get _acks => Directory('${directory.path}/acks');
 
+  /// Returns the durable root for one site without using the site ID as a
+  /// filesystem path component.
+  static Directory scopedDirectory(Directory root, String siteId) =>
+      Directory('${root.path}/site-${_siteScope(siteId)}');
+
   @override
   void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) {
-    _writeAtomically(
-      File('${_inbox.path}/${envelope.objectId}.bin'),
-      Uint8List.fromList(EnvelopeCodec.encode(envelope)),
-    );
     if (encryptedBytes != null) {
       _writeAtomically(
         File('${_inbox.path}/${envelope.objectId}.wire'),
         encryptedBytes,
       );
     }
+    // The envelope file is the completion marker used by [contains]. Write it
+    // last so a power loss or disk error cannot turn an incomplete object into
+    // a duplicate that is acknowledged without durable ciphertext.
+    _writeAtomically(
+      File('${_inbox.path}/${envelope.objectId}.bin'),
+      Uint8List.fromList(EnvelopeCodec.encode(envelope)),
+    );
   }
 
   @override
@@ -609,4 +683,7 @@ class FileRelayStore extends RelayStore {
 
   static Uint8List _int32(int value) =>
       (ByteData(4)..setInt32(0, value, Endian.big)).buffer.asUint8List();
+
+  static String _siteScope(String siteId) =>
+      sha256.convert(utf8.encode(siteId)).toString().substring(0, 24);
 }

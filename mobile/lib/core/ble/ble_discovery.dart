@@ -59,7 +59,6 @@ abstract final class MeshAdvertiser {
 
   static Future<void> _startDiscoveryLocked(DiscoveryMetadata metadata) async {
     _desiredMetadata = metadata;
-    final previousMetadata = _activeMetadata;
     final payload = MeshGatt.manufacturerPayload(
       MeshGatt.discoveryPayloadType,
       metadata.encode(),
@@ -74,6 +73,10 @@ abstract final class MeshAdvertiser {
       final canAttemptExtended = tierDecision.usesExtended;
       _extendedFallbackReason = tierDecision.reason;
       await _ensureIdleLocked();
+      // The previous advertiser has been stopped. Do not retain metadata that
+      // would claim an old connection token is still live if this restart
+      // fails.
+      _activeMetadata = null;
       await UniversalBlePeripheral.startAdvertising(
         services: const [MeshGatt.service],
         manufacturerData: ManufacturerData(MeshGatt.manufacturerId, payload),
@@ -115,7 +118,6 @@ abstract final class MeshAdvertiser {
       _capabilities = await UniversalBlePeripheral.getCapabilities();
       _activeMetadata = metadata;
     } catch (error) {
-      _activeMetadata = previousMetadata;
       // A failed start remains an intent until the caller explicitly calls
       // stop(), so the liveness watchdog can retry after radio recovery.
       _desiredMetadata = metadata;
@@ -142,7 +144,13 @@ abstract final class MeshAdvertiser {
       event,
     ) {
       if (!result.isCompleted && done(event.state)) {
-        result.complete(event.state);
+        if (event.state == PeripheralAdvertisingState.error &&
+            event.error != null &&
+            event.error!.isNotEmpty) {
+          result.completeError(StateError(event.error!));
+        } else {
+          result.complete(event.state);
+        }
       }
     });
     Timer? timer;
@@ -151,7 +159,11 @@ abstract final class MeshAdvertiser {
       if (done(current)) result.complete(current);
       timer = Timer(timeout, () async {
         if (result.isCompleted) return;
-        result.complete(await UniversalBlePeripheral.getAdvertisingState());
+        try {
+          result.complete(await UniversalBlePeripheral.getAdvertisingState());
+        } catch (error, stackTrace) {
+          result.completeError(error, stackTrace);
+        }
       });
       return await result.future;
     } finally {
@@ -229,9 +241,12 @@ abstract final class MeshAdvertiser {
     FutureOr<void> Function()? onStarted,
     FutureOr<void> Function()? onRestored,
   }) async {
-    final campaign = ++_campaignGeneration;
+    late final int campaign;
+    await _advertisingLock.synchronized(() async {
+      campaign = ++_campaignGeneration;
+      _sosCampaignActive = true;
+    });
     final deadline = DateTime.now().add(duration);
-    _sosCampaignActive = true;
     var started = false;
     try {
       while (_campaignGeneration == campaign &&
@@ -258,20 +273,27 @@ abstract final class MeshAdvertiser {
         await Future<void>.delayed(discoveryBurst);
       }
     } finally {
-      if (_campaignGeneration == campaign) {
+      var restored = false;
+      try {
+        if (_campaignGeneration == campaign) {
+          await _advertisingLock.synchronized(() async {
+            if (_campaignGeneration != campaign) return;
+            if (_sosConcurrentExtended) {
+              await _startExtendedDiscoveryLocked(discovery);
+            } else {
+              await _startDiscoveryLocked(discovery);
+            }
+            restored = true;
+          });
+        }
+      } finally {
         await _advertisingLock.synchronized(() async {
-          if (_campaignGeneration != campaign) return;
-          if (_sosConcurrentExtended) {
-            await _startExtendedDiscoveryLocked(discovery);
-          } else {
-            await _startDiscoveryLocked(discovery);
+          if (_campaignGeneration == campaign) {
+            _sosCampaignActive = false;
           }
         });
-        await onRestored?.call();
       }
-      if (_campaignGeneration == campaign) {
-        _sosCampaignActive = false;
-      }
+      if (restored) await onRestored?.call();
     }
   }
 

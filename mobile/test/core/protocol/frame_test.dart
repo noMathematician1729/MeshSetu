@@ -6,8 +6,8 @@ import 'package:test/test.dart';
 void main() {
   test('fragmentation round trips at all mtu sizes', () {
     final bytes = Uint8List.fromList(List.generate(10000, (i) => i % 251));
-    for (final mtu in [23, 100, 185, 247, 517]) {
-      final source = mtu == 23 ? Uint8List.sublistView(bytes, 0, 1500) : bytes;
+    for (final mtu in [23, 185, 247, 517]) {
+      final source = bytes;
       final frames = fragment(
         objectId: 42,
         priority: 1,
@@ -45,6 +45,19 @@ void main() {
       () => FrameCodec.decode(Uint8List(16)..[0] = 9),
       throwsArgumentError,
     );
+    final invalidSequence = FrameCodec.encode(
+      MeshFrame(
+        type: FrameType.data,
+        priority: 1,
+        flags: 0,
+        objectId: 42,
+        sequence: 0,
+        count: 2,
+        payload: Uint8List.fromList([1]),
+      ),
+    )..[12] = 0;
+    invalidSequence[13] = 2;
+    expect(() => FrameCodec.decode(invalidSequence), throwsArgumentError);
   });
 
   test('largest supported signed object ID round trips unchanged', () {

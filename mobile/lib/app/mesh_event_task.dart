@@ -111,9 +111,23 @@ class _MeshEventTaskHandler extends TaskHandler {
   bool _sosPending = false;
   bool _identityRequestPending = false;
   bool _debugLossEnabled = false;
+  int _meshPeerCount = 0;
+  String? _lastMeshNotificationText;
   StreamSubscription<ReceivedObject>? _incomingSubscription;
   int _notificationGeneration = 0;
   final Set<String> _compactAlertKeys = {};
+
+  void _updateMeshNotification(String status) {
+    final text = 'BLE relay $status · $_meshPeerCount verified peer(s)';
+    if (_lastMeshNotificationText == text) return;
+    _lastMeshNotificationText = text;
+    unawaited(
+      FlutterForegroundTask.updateService(
+        notificationTitle: 'MeshSetu event mode active',
+        notificationText: text,
+      ),
+    );
+  }
 
   /// RoomId of the room chat screen currently visible to the user, or null.
   /// Set via the 'active_room' message from the room chat screen. When
@@ -134,25 +148,36 @@ class _MeshEventTaskHandler extends TaskHandler {
       final controller = MeshEventController(
         configuration: configuration,
         zoneResolver: MeshEventController.demoZoneResolver,
-        onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_peers',
-          'peers': [
-            for (final peer in peers)
-              {
-                'peerId': peer.peerId,
-                'connected': peer.connected,
-                'mtu': peer.mtu,
-                'rssi': peer.rssi,
-                'txPowerAtOneMeter': peer.txPowerAtOneMeter,
-                'queuedObjects': peer.queuedObjects,
-                'lastSeenMs': peer.lastSeenMs,
-              },
-          ],
-        }),
-        onMeshStatus: (status) => FlutterForegroundTask.sendDataToMain({
-          'status': 'mesh_status',
-          'value': status,
-        }),
+        onPeerState: (peers) {
+          _meshPeerCount = peers
+              .where((peer) => peer.connected && peer.protocolVerified)
+              .length;
+          _updateMeshNotification('active');
+          FlutterForegroundTask.sendDataToMain({
+            'status': 'mesh_peers',
+            'peers': [
+              for (final peer in peers)
+                {
+                  'peerId': peer.peerId,
+                  'connected': peer.connected,
+                  'lifecycle': peer.lifecycle.name,
+                  'protocolVerified': peer.protocolVerified,
+                  'mtu': peer.mtu,
+                  'rssi': peer.rssi,
+                  'txPowerAtOneMeter': peer.txPowerAtOneMeter,
+                  'queuedObjects': peer.queuedObjects,
+                  'lastSeenMs': peer.lastSeenMs,
+                },
+            ],
+          });
+        },
+        onMeshStatus: (status) {
+          _updateMeshNotification(status);
+          FlutterForegroundTask.sendDataToMain({
+            'status': 'mesh_status',
+            'value': status,
+          });
+        },
         onMetrics: (metrics) => FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_metric',
           'metrics': [
@@ -236,6 +261,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         'status': 'error',
         'message': message,
       });
+      _updateMeshNotification('error');
     }
   }
 
@@ -361,13 +387,17 @@ class _MeshEventTaskHandler extends TaskHandler {
 
   Future<void> _submitMeshObject(MeshEnvelope envelope) async {
     final controller = _controller;
-    if (controller == null || controller.coordinator == null) {
+    if (controller == null ||
+        controller.coordinator == null ||
+        envelope.siteId != controller.configuration.siteId) {
       FlutterForegroundTask.sendDataToMain({
         'status': 'mesh_submit_result',
         'objectId': envelope.objectId,
         'eventId': envelope.eventId,
         'accepted': false,
-        'reason': 'event mode is not ready',
+        'reason': controller == null || controller.coordinator == null
+            ? 'event mode is not ready'
+            : 'mesh envelope belongs to another site',
       });
       return;
     }

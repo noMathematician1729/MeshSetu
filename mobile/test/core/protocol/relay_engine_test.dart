@@ -26,7 +26,191 @@ class _AckTrackingStore extends RelayStore {
   void markAck(int objectId, String peerId) => acked.add(objectId);
 }
 
+class _FailingStore extends RelayStore {
+  @override
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) {
+    throw StateError('disk full');
+  }
+}
+
 void main() {
+  test(
+    'reassembles a shuffled 10 KiB ciphertext at every supported MTU',
+    () async {
+      final source = MeshEnvelope(
+        objectId: 1001,
+        eventId: 'large-event',
+        siteId: 'site',
+        roomId: 'room',
+        createdAtMs: 1,
+        expiresAtMs: 100000,
+        hopCount: 0,
+        hopLimit: 0,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.roomMessage,
+        payload: Uint8List(9500),
+        originEphemeralId: 1,
+      );
+      for (final mtu in [23, 185, 247, 517]) {
+        final crypto = AeadEnvelope(List.filled(32, mtu % 251));
+        final encrypted = await crypto.encrypt(source);
+        final engine = MeshRelayEngine(
+          siteId: 'site',
+          crypto: crypto,
+          store: _RecordingStore(),
+          clockMs: () => 100,
+        );
+        final frames = fragment(
+          objectId: source.objectId,
+          priority: source.priority.index,
+          encrypted: encrypted.bytes,
+          mtu: mtu,
+        )..shuffle();
+        RelayResult result = const RelayResult([], []);
+        for (final frame in frames) {
+          result = await engine.receive('peer', FrameCodec.encode(frame));
+        }
+        expect(result.controlFrames, isNotEmpty, reason: 'MTU $mtu');
+      }
+    },
+  );
+
+  test('does not ACK an object when durable persistence fails', () async {
+    final crypto = AeadEnvelope(List.filled(32, 9));
+    final source = MeshEnvelope(
+      objectId: 1002,
+      eventId: 'disk-event',
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000,
+      hopCount: 0,
+      hopLimit: 0,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([1]),
+      originEphemeralId: 1,
+    );
+    final encrypted = await crypto.encrypt(source);
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: _FailingStore(),
+      clockMs: () => 100,
+    );
+    final frame = FrameCodec.encode(
+      fragment(
+        objectId: source.objectId,
+        priority: 1,
+        encrypted: encrypted.bytes,
+        mtu: 185,
+      ).single,
+    );
+    final result = await engine.receive('peer', frame);
+    expect(result.controlFrames, isEmpty);
+    expect(result.metrics.any((m) => m.kind == 'persist_failed'), isTrue);
+  });
+
+  test('duplicate fragments do not discard the partial object', () async {
+    final crypto = AeadEnvelope(List.filled(32, 10));
+    final store = _RecordingStore();
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: store,
+      clockMs: () => 100,
+    );
+    final source = MeshEnvelope(
+      objectId: 1003,
+      eventId: 'duplicate-fragment-event',
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000,
+      hopCount: 0,
+      hopLimit: 0,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList(List<int>.generate(32, (i) => i)),
+      originEphemeralId: 1,
+    );
+    final encrypted = await crypto.encrypt(source);
+    final frames = fragment(
+      objectId: source.objectId,
+      priority: source.priority.index,
+      encrypted: encrypted.bytes,
+      mtu: 23,
+    );
+    expect(frames.length, greaterThan(1));
+
+    await engine.receive('peer', FrameCodec.encode(frames.first));
+    final duplicateResult = await engine.receive(
+      'peer',
+      FrameCodec.encode(frames.first),
+    );
+    expect(
+      duplicateResult.metrics.any(
+        (metric) => metric.kind == 'duplicate_fragment',
+      ),
+      isTrue,
+    );
+    RelayResult completedResult = const RelayResult([], []);
+    for (final frame in frames.skip(1)) {
+      completedResult = await engine.receive('peer', FrameCodec.encode(frame));
+    }
+
+    expect(
+      completedResult.metrics.any((metric) => metric.kind == 'object_complete'),
+      isTrue,
+    );
+    expect(store.stored, hasLength(1));
+  });
+
+  test('stale partial objects expire without reaching persistence', () async {
+    var now = 100;
+    final crypto = AeadEnvelope(List.filled(32, 11));
+    final store = _RecordingStore();
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: store,
+      clockMs: () => now,
+    );
+    final source = MeshEnvelope(
+      objectId: 1004,
+      eventId: 'stale-event',
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000,
+      hopCount: 0,
+      hopLimit: 0,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList(List<int>.generate(32, (i) => i)),
+      originEphemeralId: 1,
+    );
+    final encrypted = await crypto.encrypt(source);
+    final frames = fragment(
+      objectId: source.objectId,
+      priority: source.priority.index,
+      encrypted: encrypted.bytes,
+      mtu: 23,
+    );
+    await engine.receive('peer', FrameCodec.encode(frames.first));
+    now += 30000;
+    final result = await engine.receive(
+      'peer-2',
+      FrameCodec.encode(frames.first),
+    );
+
+    expect(store.stored, isEmpty);
+    expect(
+      result.metrics.any((metric) => metric.kind == 'reassembly_timeout'),
+      isTrue,
+    );
+  });
+
   test('persists once and enqueues next hop', () async {
     final crypto = AeadEnvelope(List.filled(32, 7));
     final store = _RecordingStore();
@@ -337,6 +521,25 @@ void main() {
       File('${directory.path}/acks/${value.objectId}.ack').existsSync(),
       isTrue,
     );
+  });
+
+  test('file relay stores are isolated by site scope', () {
+    final root = Directory.systemTemp.createTempSync('meshsetu-sites');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final siteA = FileRelayStore(root, siteId: 'site-a');
+    final siteB = FileRelayStore(root, siteId: 'site-b');
+    siteA.enqueue(
+      EncryptedObject(
+        objectId: 16,
+        trafficClass: TrafficClass.sosStructured,
+        bytes: Uint8List.fromList([1]),
+        expiresAtMs: 1000,
+        createdAtMs: 10,
+      ),
+    );
+
+    expect(siteA.pending(100), hasLength(1));
+    expect(siteB.pending(100), isEmpty);
   });
 
   test('file store removes expired pending entries', () {

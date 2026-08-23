@@ -204,7 +204,7 @@ class GattPeerSession {
       _throwIfClosed();
 
       _setPhase('ready', PeerSessionState.ready);
-      _emit('peer_session_ready', value: mtu);
+      _emit('gatt_session_ready', value: mtu);
       _ready.complete();
     } catch (error) {
       _failure ??= error;
@@ -219,6 +219,11 @@ class GattPeerSession {
   Future<void> awaitReady() => _ready.future;
 
   Future<void> send(Uint8List bytes, {bool withResponse = true}) async {
+    if (bytes.isEmpty || bytes.length > MeshGatt.maxAttributeValueBytes) {
+      throw ArgumentError(
+        'GATT frame length must be 1..${MeshGatt.maxAttributeValueBytes}',
+      );
+    }
     await _writeLock.synchronized(() async {
       await awaitReady();
       _emit('frame_write_started', value: bytes.length, detail: 'rx');

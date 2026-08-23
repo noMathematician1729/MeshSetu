@@ -49,6 +49,11 @@ class RecentObjectCache {
   final int maxEntries;
   final Map<int, int> _seen = <int, int>{};
 
+  bool contains(int id, int nowMs) {
+    _seen.removeWhere((_, expiry) => expiry <= nowMs);
+    return _seen.containsKey(id);
+  }
+
   bool markIfNew(int id, int expiresAtMs, int nowMs) {
     _seen.removeWhere((_, expiry) => expiry <= nowMs);
     if (_seen.containsKey(id)) return false;

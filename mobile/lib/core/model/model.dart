@@ -44,6 +44,15 @@ enum TrafficClass {
   final int rank;
 }
 
+enum PeerLifecycleState {
+  discovered,
+  connecting,
+  helloVerifying,
+  ready,
+  rejected,
+  disconnected,
+}
+
 class MeshEnvelope {
   MeshEnvelope({
     required this.objectId,
@@ -139,6 +148,8 @@ class PeerState {
     required this.peerId,
     required this.siteFingerprint,
     required this.connected,
+    this.lifecycle = PeerLifecycleState.ready,
+    this.protocolVerified = false,
     required this.mtu,
     required this.rssi,
     this.txPowerAtOneMeter,
@@ -149,6 +160,8 @@ class PeerState {
   final String peerId;
   final int siteFingerprint;
   final bool connected;
+  final PeerLifecycleState lifecycle;
+  final bool protocolVerified;
   final int mtu;
   final int? rssi;
   final int? txPowerAtOneMeter;

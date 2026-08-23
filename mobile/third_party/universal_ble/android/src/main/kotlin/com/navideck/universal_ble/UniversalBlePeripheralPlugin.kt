@@ -157,7 +157,12 @@ class UniversalBlePeripheralPlugin(
     }
 
     override fun addService(service: PeripheralService) {
-        requireGattServer().addService(service.toGattService())
+        if (!requireGattServer().addService(service.toGattService())) {
+            callback.onServiceAdded(
+                service.uuid,
+                "BluetoothGattServer rejected service registration",
+            ) {}
+        }
     }
 
     override fun removeService(serviceId: String) {
@@ -168,6 +173,7 @@ class UniversalBlePeripheralPlugin(
         // Teardown must not lazily open a brand-new GATT server after the
         // plugin has already been disposed.
         gattServer?.clearServices()
+        clearPeripheralCaches()
     }
 
     override fun getServices(): List<String> =
@@ -715,6 +721,21 @@ class UniversalBlePeripheralPlugin(
                 "RX_WRITE_REQUEST: ${device.address} characteristic=${characteristic.uuid} " +
                     "requestId=$requestId offset=$offset bytes=${value.size}",
             )
+            // MeshSetu uses application-level fragmentation. Prepared/long
+            // writes would otherwise let Android assemble a partial GATT
+            // value outside the frame protocol.
+            if (preparedWrite || offset != 0) {
+                if (responseNeeded) {
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED,
+                        offset,
+                        emptyBytes,
+                    )
+                }
+                return
+            }
             super.onCharacteristicWriteRequest(
                 device, requestId, characteristic, preparedWrite, responseNeeded, offset, value,
             )
@@ -800,8 +821,26 @@ class UniversalBlePeripheralPlugin(
                 "CCCD_WRITE_REQUEST: ${device.address} descriptor=${descriptor.uuid} " +
                     "characteristic=${descriptor.characteristic.uuid} bytes=${value?.size ?: 0}",
             )
+            val isCccd =
+                descriptor.uuid.toString().lowercase() == peripheralDescriptorCCUUID.lowercase()
+            val isValidCccdValue =
+                value != null &&
+                    (BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE.contentEquals(value) ||
+                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE.contentEquals(value))
+            if (preparedWrite || offset != 0 || (isCccd && !isValidCccdValue)) {
+                if (responseNeeded) {
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED,
+                        offset,
+                        emptyBytes,
+                    )
+                }
+                return
+            }
             descriptor.value = value
-            if (descriptor.uuid.toString().lowercase() == peripheralDescriptorCCUUID.lowercase()) {
+            if (isCccd) {
                 val isSubscribed =
                     BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE.contentEquals(value) ||
                             BluetoothGattDescriptor.ENABLE_INDICATION_VALUE.contentEquals(value)

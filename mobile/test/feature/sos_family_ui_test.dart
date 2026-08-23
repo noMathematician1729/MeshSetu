@@ -150,7 +150,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Admin delivery pending'), findsOneWidget);
+      expect(find.text('Acknowledged by the mesh'), findsOneWidget);
       // The radar sweep runs a repeating AnimationController, and Drift
       // schedules a zero-duration internal timer when the delivery
       // StreamBuilder's query stream is cancelled — settle both before the
@@ -200,8 +200,13 @@ void main() {
           ),
         );
         await tester.pump();
-        expect(find.text('Mesh active · waiting for a peer'), findsOneWidget);
-        expect(find.textContaining('No connected mesh peers'), findsOneWidget);
+        expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
+        expect(
+          find.text(
+            'Mesh is running; waiting for a nearby peer to accept the packet',
+          ),
+          findsOneWidget,
+        );
         expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
       },
     );

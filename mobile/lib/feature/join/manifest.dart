@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import '../../core/ble/device_key_store.dart';
+
 /// Bible §9.2 `EventManifest`/`RoomManifest`. The Mesh Code / QR bootstrap
 /// identifier for an event/site namespace — not a network root key.
 final class EventManifest {
@@ -19,6 +21,34 @@ final class EventManifest {
   final String siteId, siteName, meshCode, gatewayHint;
   final int validFromMs, validUntilMs;
   final List<RoomManifest> rooms;
+
+  bool get isWellFormed {
+    if (siteId.trim().isEmpty ||
+        siteId.length > 128 ||
+        siteName.trim().isEmpty ||
+        siteName.length > 256 ||
+        meshCode.trim().isEmpty ||
+        meshCode.length > 128 ||
+        validFromMs < 0 ||
+        validUntilMs <= validFromMs) {
+      return false;
+    }
+    final roomIds = <String>{};
+    for (final room in rooms) {
+      if (room.roomId.trim().isEmpty ||
+          room.roomId.length > 64 ||
+          room.name.trim().isEmpty ||
+          room.name.length > 128 ||
+          room.role.trim().isEmpty ||
+          room.role.length > 32 ||
+          room.ttlSeconds <= 0 ||
+          room.ttlSeconds > const Duration(days: 30).inSeconds ||
+          !roomIds.add(room.roomId)) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 final class RoomManifest {
@@ -64,9 +94,19 @@ final class JoinInvalid extends JoinResult {
 /// trusted authority — real deployments need a real signing key held only by
 /// event organizers. (Bible §9.4 validation checklist.)
 abstract final class EventManifestCodec {
-  static const String demoSigningKeyB64 = 'meshsetu-demo-manifest-key-v1';
+  /// The key is deliberately owned by the hackathon provisioning boundary;
+  /// it is not a production authority key.
+  static const String demoSigningKeyB64 =
+      HackathonProvisioning.manifestSigningKey;
 
   static String encode(EventManifest manifest, {String? roomId}) {
+    if (!manifest.isWellFormed) {
+      throw ArgumentError('manifest is not well formed');
+    }
+    if (roomId != null &&
+        !manifest.rooms.any((room) => room.roomId == roomId)) {
+      throw ArgumentError('room is not present in manifest');
+    }
     final body = _bodyJson(manifest, roomId: roomId);
     final sig = _sign(body);
     return jsonEncode({'body': jsonDecode(body), 'sig': sig});

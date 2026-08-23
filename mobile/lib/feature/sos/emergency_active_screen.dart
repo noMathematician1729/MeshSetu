@@ -200,9 +200,9 @@ class _DeliveryProjectionPanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final db = ref.watch(databaseProvider);
     final id = eventId;
     if (id == null) return _panel(context, null);
+    final db = ref.watch(databaseProvider);
     return StreamBuilder<OutboxEvent?>(
       stream: db.watchEvent(id),
       builder: (context, snapshot) => _panel(context, snapshot.data?.state),

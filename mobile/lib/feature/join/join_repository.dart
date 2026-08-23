@@ -102,19 +102,23 @@ class JoinRepository {
     required bool signatureValid,
     String? roomId,
   }) async {
+    if (!manifest.isWellFormed) return const JoinInvalid('invalid_manifest');
     if (!signatureValid) return const JoinInvalid('signature');
     if (roomId != null &&
         !manifest.rooms.any((room) => room.roomId == roomId)) {
       return const JoinInvalid('unknown_room');
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now > manifest.validUntilMs) return const JoinInvalid('expired');
+    if (now >= manifest.validUntilMs) return const JoinInvalid('expired');
     if (now < manifest.validFromMs) return const JoinInvalid('not_yet_valid');
     await activateManifest(manifest);
     return JoinResult.ok(manifest, roomId: roomId);
   }
 
   Future<void> activateManifest(EventManifest manifest) async {
+    if (!manifest.isWellFormed) {
+      throw ArgumentError('manifest is not well formed');
+    }
     await _db
         .into(_db.siteManifests)
         .insertOnConflictUpdate(
@@ -167,24 +171,29 @@ class JoinRepository {
     final row = await _db.currentSite();
     if (row == null) return null;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now < row.validFromMs || now > row.validUntilMs) return null;
-    final roomsRaw = jsonDecode(row.roomsJson) as List<Object?>;
-    return EventManifest(
-      siteId: row.siteId,
-      siteName: row.siteName,
-      meshCode: row.meshCode,
-      validFromMs: row.validFromMs,
-      validUntilMs: row.validUntilMs,
-      gatewayHint: row.gatewayHint ?? '',
-      rooms: [
-        for (final r in roomsRaw)
-          RoomManifest(
-            roomId: (r as Map<String, Object?>)['roomId'] as String,
-            name: r['name'] as String,
-            role: r['role'] as String,
-            ttlSeconds: r['ttlSeconds'] as int,
-          ),
-      ],
-    );
+    if (now < row.validFromMs || now >= row.validUntilMs) return null;
+    try {
+      final roomsRaw = jsonDecode(row.roomsJson) as List<Object?>;
+      final manifest = EventManifest(
+        siteId: row.siteId,
+        siteName: row.siteName,
+        meshCode: row.meshCode,
+        validFromMs: row.validFromMs,
+        validUntilMs: row.validUntilMs,
+        gatewayHint: row.gatewayHint ?? '',
+        rooms: [
+          for (final r in roomsRaw)
+            RoomManifest(
+              roomId: (r as Map<String, Object?>)['roomId'] as String,
+              name: r['name'] as String,
+              role: r['role'] as String,
+              ttlSeconds: r['ttlSeconds'] as int,
+            ),
+        ],
+      );
+      return manifest.isWellFormed ? manifest : null;
+    } on Object {
+      return null;
+    }
   }
 }

@@ -152,13 +152,12 @@ class MeshTransportCoordinator implements MeshTransport {
   final Set<String> _serverPeersStarting = {};
   final Map<int, String> _lastInboundPeerByObject = {};
 
-  /// Peers that have sent at least one decodable, same-site HELLO frame
-  /// (Bible audit Task 5). A peer connected via the UUID-only fallback
-  /// (Task 4) or one that skips HELLO entirely is not in this set; today
-  /// that only emits `peer_unverified_site` on every non-HELLO frame it
-  /// sends (log-only, per plan) rather than dropping the connection, so
-  /// this can be watched on real devices before flipping to strict.
+  /// Peers that have sent a valid, same-site HELLO frame. Discovery metadata
+  /// is only a routing hint; this set is the transport admission boundary.
   final Set<String> _helloVerifiedPeers = {};
+  final Map<String, Timer> _helloTimers = {};
+  static const _helloTimeout = Duration(seconds: 15);
+  static const _helloRetryInterval = Duration(milliseconds: 500);
   // Lock order is relay -> pump. No pump-held path may await the relay lock.
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
@@ -204,12 +203,23 @@ class MeshTransportCoordinator implements MeshTransport {
             await _ensureServerPeer(frame.deviceId);
             if (_stopped) return;
             if (!_sessions.containsKey(frame.deviceId)) return;
+            final wasHelloVerified = _helloVerifiedPeers.contains(
+              frame.deviceId,
+            );
             if (!_acceptsHello(frame.deviceId, frame.bytes)) {
               final link = _sessions[frame.deviceId];
               server.rejectPeer(frame.deviceId);
               _detach(frame.deviceId, expected: link, promoteRejected: false);
               unawaited(link?.close());
               return;
+            }
+            if (localHello != null &&
+                !wasHelloVerified &&
+                _helloVerifiedPeers.contains(frame.deviceId)) {
+              await _sendServerControl(
+                frame.deviceId,
+                _helloFrame(localHello!),
+              );
             }
             _onMetrics([
               RelayMetric(
@@ -326,6 +336,10 @@ class MeshTransportCoordinator implements MeshTransport {
         peerId: peerId,
         siteFingerprint: siteFingerprint,
         connected: true,
+        lifecycle: localHello == null
+            ? PeerLifecycleState.ready
+            : PeerLifecycleState.helloVerifying,
+        protocolVerified: localHello == null,
         mtu: link.mtu,
         rssi: rssi,
         txPowerAtOneMeter: txPowerAtOneMeter,
@@ -336,7 +350,10 @@ class MeshTransportCoordinator implements MeshTransport {
     _emitPeers();
     _onMetrics([
       RelayMetric('peer_connected', peerId: peerId, value: link.mtu),
-      RelayMetric('peer_session_ready', peerId: peerId, value: link.mtu),
+      if (localHello != null)
+        RelayMetric('peer_hello_verifying', peerId: peerId, value: link.mtu),
+      if (localHello == null)
+        RelayMetric('peer_session_ready', peerId: peerId, value: link.mtu),
       RelayMetric(
         'peer_count_changed',
         peerId: peerId,
@@ -364,10 +381,16 @@ class MeshTransportCoordinator implements MeshTransport {
           _relayLock.synchronized(() async {
             try {
               if (_stopped || _sessions[peerId] != link) return;
+              final wasHelloVerified = _helloVerifiedPeers.contains(peerId);
               if (!_acceptsHello(peerId, bytes)) {
                 _detach(peerId, expected: link);
                 await link.close();
                 return;
+              }
+              if (localHello != null &&
+                  !wasHelloVerified &&
+                  _helloVerifiedPeers.contains(peerId)) {
+                await _sendControl(peerId, link, _helloFrame(localHello!));
               }
               _onMetrics([
                 RelayMetric(
@@ -393,26 +416,57 @@ class MeshTransportCoordinator implements MeshTransport {
       }),
     );
     _sessionSubscriptions[peerId] = subscriptions;
+    if (localHello != null) {
+      var retries = 0;
+      _helloTimers[peerId] = Timer.periodic(_helloRetryInterval, (timer) {
+        if (_helloVerifiedPeers.contains(peerId) ||
+            _sessions[peerId] != link ||
+            _stopped) {
+          timer.cancel();
+          return;
+        }
+        retries++;
+        if (retries * _helloRetryInterval.inMilliseconds >=
+            _helloTimeout.inMilliseconds) {
+          timer.cancel();
+          _onMetrics([
+            RelayMetric('peer_hello_timeout', peerId: peerId),
+            RelayMetric(
+              'peer_rejected',
+              peerId: peerId,
+              detail: 'hello_timeout',
+            ),
+          ]);
+          if (link is GattServerPeerLink) server.rejectPeer(peerId);
+          _detach(peerId, expected: link);
+          unawaited(link.close());
+          return;
+        }
+        final hello = localHello;
+        if (hello == null) return;
+        unawaited(
+          _sendControl(
+            peerId,
+            link,
+            FrameCodec.encode(
+              MeshFrame(
+                type: FrameType.hello,
+                priority: 0,
+                flags: 0,
+                objectId: hello.ephemeralNodeId,
+                sequence: 0,
+                count: 1,
+                payload: HelloCodec.encode(hello),
+              ),
+            ),
+          ),
+        );
+      });
+    }
 
     final hello = localHello;
     if (hello != null) {
-      unawaited(
-        _sendControl(
-          peerId,
-          link,
-          FrameCodec.encode(
-            MeshFrame(
-              type: FrameType.hello,
-              priority: 0,
-              flags: 0,
-              objectId: hello.ephemeralNodeId,
-              sequence: 0,
-              count: 1,
-              payload: HelloCodec.encode(hello),
-            ),
-          ),
-        ),
-      );
+      unawaited(_sendControl(peerId, link, _helloFrame(hello)));
     }
     if (schedulerHasQueuedObject) _wakeScheduler('peer_ready');
   }
@@ -478,7 +532,12 @@ class MeshTransportCoordinator implements MeshTransport {
         var successfulPeers = 0;
         final sourcePeer = _lastInboundPeerByObject[objectToSend.objectId];
         final peers = _sessions.entries
-            .where((entry) => entry.key != sourcePeer)
+            .where(
+              (entry) =>
+                  entry.key != sourcePeer &&
+                  (localHello == null ||
+                      _helloVerifiedPeers.contains(entry.key)),
+            )
             .toList();
         if (peers.isEmpty) {
           relay.requeue(objectToSend);
@@ -629,6 +688,10 @@ class MeshTransportCoordinator implements MeshTransport {
     _serverPeersStarting.clear();
     _lastInboundPeerByObject.clear();
     _helloVerifiedPeers.clear();
+    for (final timer in _helloTimers.values) {
+      timer.cancel();
+    }
+    _helloTimers.clear();
     await server.stop();
     _peers = [];
     _emitPeers();
@@ -643,6 +706,7 @@ class MeshTransportCoordinator implements MeshTransport {
   }) {
     final current = _sessions[peerId];
     if (current == null || (expected != null && current != expected)) return;
+    _helloTimers.remove(peerId)?.cancel();
     _helloVerifiedPeers.remove(peerId);
     final peerCountBefore = _sessions.length;
     _sessions.remove(peerId);
@@ -738,6 +802,8 @@ class MeshTransportCoordinator implements MeshTransport {
       peerId: peer.peerId,
       siteFingerprint: peer.siteFingerprint,
       connected: peer.connected,
+      lifecycle: peer.lifecycle,
+      protocolVerified: peer.protocolVerified,
       mtu: peer.mtu,
       rssi: peer.rssi,
       txPowerAtOneMeter: peer.txPowerAtOneMeter,
@@ -772,6 +838,18 @@ class MeshTransportCoordinator implements MeshTransport {
       _reportControlResult(peerId, frame, false);
     }
   }
+
+  Uint8List _helloFrame(Hello hello) => FrameCodec.encode(
+    MeshFrame(
+      type: FrameType.hello,
+      priority: 0,
+      flags: 0,
+      objectId: hello.ephemeralNodeId,
+      sequence: 0,
+      count: 1,
+      payload: HelloCodec.encode(hello),
+    ),
+  );
 
   Future<void> _sendControl(
     String peerId,
@@ -833,30 +911,75 @@ class MeshTransportCoordinator implements MeshTransport {
     try {
       frame = FrameCodec.decode(bytes);
     } catch (_) {
-      _reportUnverifiedTraffic(peerId);
-      return true;
+      _rejectHello(peerId, 'malformed_frame');
+      return false;
     }
     if (frame.type != FrameType.hello) {
-      _reportUnverifiedTraffic(peerId);
-      return true;
+      if (localHello == null || _helloVerifiedPeers.contains(peerId)) {
+        return true;
+      }
+      _rejectHello(peerId, 'traffic_before_hello');
+      return false;
+    }
+    if (frame.priority != 0 ||
+        frame.flags != 0 ||
+        frame.sequence != 0 ||
+        frame.count != 1) {
+      _rejectHello(peerId, 'invalid_hello_frame');
+      return false;
     }
     final remote = HelloCodec.decode(frame.payload);
-    if (remote == null) return false;
+    if (remote == null) {
+      _rejectHello(peerId, 'malformed_hello');
+      return false;
+    }
     final hello = localHello;
-    final sameSite =
-        hello == null || remote.siteFingerprint == hello.siteFingerprint;
-    if (sameSite) _helloVerifiedPeers.add(peerId);
-    return sameSite;
+    if (hello == null) return true;
+    if (frame.objectId != remote.ephemeralNodeId ||
+        remote.ephemeralNodeId <= 0 ||
+        remote.protocolVersion != frameVersion ||
+        remote.siteFingerprint != hello.siteFingerprint ||
+        remote.capabilities < 0 ||
+        (remote.capabilities & ~helloKnownCapabilityMask) != 0 ||
+        remote.maxObjectBytes <= 0 ||
+        remote.maxObjectBytes > maxObjectBytes) {
+      _rejectHello(peerId, 'incompatible_hello');
+      return false;
+    }
+    _helloVerifiedPeers.add(peerId);
+    _helloTimers.remove(peerId)?.cancel();
+    _markHelloVerified(peerId);
+    _onMetrics([
+      RelayMetric('peer_hello_verified', peerId: peerId),
+      RelayMetric('peer_session_ready', peerId: peerId),
+    ]);
+    _wakeScheduler('peer_hello_verified');
+    return true;
   }
 
-  /// Log-only enforcement (Bible audit Task 5): a peer that has never sent a
-  /// decodable, same-site HELLO is still allowed to relay today — flipping
-  /// this to strict (dropping the connection instead) is the next step once
-  /// `peer_unverified_site` has been observed on real devices to confirm it
-  /// does not fire for legitimate peers using the UUID-only fallback path
-  /// before their HELLO round-trip completes.
-  void _reportUnverifiedTraffic(String peerId) {
-    if (_helloVerifiedPeers.contains(peerId)) return;
-    _onMetrics([RelayMetric('peer_unverified_site', peerId: peerId)]);
+  void _rejectHello(String peerId, String reason) {
+    _onMetrics([
+      RelayMetric('peer_hello_rejected', peerId: peerId, detail: reason),
+      RelayMetric('peer_rejected', peerId: peerId, detail: reason),
+    ]);
+  }
+
+  void _markHelloVerified(String peerId) {
+    final index = _peers.indexWhere((peer) => peer.peerId == peerId);
+    if (index == -1) return;
+    final peer = _peers[index];
+    _peers[index] = PeerState(
+      peerId: peer.peerId,
+      siteFingerprint: peer.siteFingerprint,
+      connected: peer.connected,
+      lifecycle: PeerLifecycleState.ready,
+      protocolVerified: true,
+      mtu: peer.mtu,
+      rssi: peer.rssi,
+      txPowerAtOneMeter: peer.txPowerAtOneMeter,
+      queuedObjects: relay.scheduler.size(),
+      lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _emitPeers();
   }
 }

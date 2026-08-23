@@ -64,8 +64,8 @@ final class MeshSiteConfiguration {
 class MeshEventController {
   static const String demoSiteId = 'demo-site';
   static const String demoSiteNamespace = 'demo';
-  static const int capabilityRelay = 1;
-  static const int capabilityVoice = 1 << 3;
+  static const int capabilityRelay = helloCapabilityRelay;
+  static const int capabilityVoice = helloCapabilityVoice;
 
   /// Demo manifest used by the foreground task. A real site should replace
   /// this with its signed anchor map before deployment.
@@ -109,7 +109,9 @@ class MeshEventController {
   Completer<void>? _scanCancel;
   Future<void>? _scanFuture;
   final Map<String, int> _retryAfterMs = {};
+  final Map<String, int> _connectionFailures = {};
   final Set<Future<void>> _connectionAttempts = {};
+  final Set<GattPeerSession> _pendingSessions = {};
   final Set<String> _connectingPeerIds = {};
   StreamSubscription<List<PeerState>>? _peerStateSubscription;
   DiscoveryMetadata? _discoveryMetadata;
@@ -177,12 +179,15 @@ class MeshEventController {
 
       final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
         configuration.siteId,
-        SiteKeyProvisioning.demoKey(configuration.siteId),
+        HackathonProvisioning.siteKeyFor(configuration.siteId),
       );
       final relay = MeshRelayEngine(
         siteId: configuration.siteId,
         crypto: AeadEnvelope(siteKeyBytes),
-        store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
+        store: FileRelayStore(
+          Directory('${documentsDir.path}/mesh-relay'),
+          siteId: configuration.siteId,
+        ),
         clockMs: () => DateTime.now().millisecondsSinceEpoch,
       );
       final server = MeshGattServer(
@@ -613,6 +618,7 @@ class MeshEventController {
           ]);
         },
       );
+      _pendingSessions.add(session);
       await session.awaitReady().timeout(const Duration(seconds: 45));
       if (!_looping) {
         await session.close();
@@ -629,7 +635,7 @@ class MeshEventController {
       _retryAfterMs.remove(deviceId);
       _uuidOnlySightings.remove(deviceId);
     } catch (error) {
-      _retryAfterMs[deviceId] = DateTime.now().millisecondsSinceEpoch + 10000;
+      _schedulePeerRetry(deviceId);
       _reportMetrics([
         RelayMetric(
           'uuid_only_fallback_connect_failed',
@@ -640,6 +646,8 @@ class MeshEventController {
         ),
       ]);
       unawaited(session?.close());
+    } finally {
+      if (session != null) _pendingSessions.remove(session);
     }
   }
 
@@ -693,6 +701,7 @@ class MeshEventController {
           ]);
         },
       );
+      _pendingSessions.add(session);
       // GattPeerSession has phase-specific timeouts. This outer timeout is
       // only a final guard against a platform implementation that never
       // returns from an operation at all.
@@ -709,9 +718,9 @@ class MeshEventController {
         txPowerAtOneMeter: peer.device.txPower,
       );
       _retryAfterMs.remove(peer.device.deviceId);
+      _connectionFailures.remove(peer.device.deviceId);
     } catch (error) {
-      _retryAfterMs[peer.device.deviceId] =
-          DateTime.now().millisecondsSinceEpoch + 10000;
+      _schedulePeerRetry(peer.device.deviceId);
       _reportMetrics([
         RelayMetric(
           'peer_connect_failed',
@@ -722,6 +731,8 @@ class MeshEventController {
         ),
       ]);
       unawaited(session?.close());
+    } finally {
+      if (session != null) _pendingSessions.remove(session);
     }
   }
 
@@ -889,6 +900,7 @@ class MeshEventController {
     _scanCancel = null;
     _scanFuture = null;
     _retryAfterMs.clear();
+    _connectionFailures.clear();
     _seenCompactAlerts.clear();
     _uuidOnlySightings.clear();
     _waitingForRemoteDialSinceMs.clear();
@@ -903,6 +915,10 @@ class MeshEventController {
       // Advertising may already have stopped or never started.
     }
     try {
+      await Future.wait([
+        for (final session in _pendingSessions.toList()) session.close(),
+      ], eagerError: false);
+      _pendingSessions.clear();
       await scanFuture;
       final connectionAttempts = _connectionAttempts.toList();
       await Future.wait(connectionAttempts);
@@ -933,6 +949,23 @@ class MeshEventController {
         ),
       );
     }
+  }
+
+  void _schedulePeerRetry(String peerId) {
+    final attempt = (_connectionFailures[peerId] ?? 0) + 1;
+    _connectionFailures[peerId] = attempt;
+    final seconds = min(60, 1 << min(attempt - 1, 6));
+    final delay = Duration(seconds: seconds);
+    _retryAfterMs[peerId] =
+        DateTime.now().millisecondsSinceEpoch + delay.inMilliseconds;
+    _reportMetrics([
+      RelayMetric(
+        'peer_reconnect_backoff',
+        peerId: peerId,
+        value: delay.inMilliseconds,
+        detail: 'attempt=$attempt',
+      ),
+    ]);
   }
 
   static int _randomNonZero32() {

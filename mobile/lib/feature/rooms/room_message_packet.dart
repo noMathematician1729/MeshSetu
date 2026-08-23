@@ -262,7 +262,7 @@ abstract final class RoomMessagePacketCodec {
     final authenticated = Uint8List.fromList([...context, ...packetWithoutTag]);
     final digest = Hmac(
       sha256,
-      SiteKeyProvisioning.demoKey(siteId),
+      HackathonProvisioning.siteKeyFor(siteId),
     ).convert(authenticated);
     return Uint8List.fromList(digest.bytes.sublist(0, _tagBytes));
   }

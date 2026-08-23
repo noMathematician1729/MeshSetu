@@ -20,3 +20,5 @@ mobile/android/local.properties
 node_modules/
 dist/
 Ceal
+RedGridLink
+.cursor

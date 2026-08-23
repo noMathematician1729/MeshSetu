@@ -357,7 +357,17 @@ class MeshGattServer {
   /// their plugin operation completes because this app's Android callback is
   /// not available there.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
-    if (!_running || bytes.isEmpty || !_subscribers.contains(deviceId)) {
+    if (!_running ||
+        bytes.isEmpty ||
+        bytes.length > MeshGatt.maxAttributeValueBytes ||
+        !_subscribers.contains(deviceId)) {
+      if (bytes.length > MeshGatt.maxAttributeValueBytes) {
+        _diagnostic(
+          'tx_notify_rejected',
+          deviceId,
+          detail: 'invalid_frame_length=${bytes.length}',
+        );
+      }
       return false;
     }
     return _notifyLock.synchronized(() async {

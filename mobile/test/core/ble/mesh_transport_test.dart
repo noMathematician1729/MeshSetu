@@ -252,6 +252,82 @@ void main() {
     expect(received.peerId, 'peer-a');
   });
 
+  test('forwards a durable object across an A-to-B-to-C path', () async {
+    const helloA = Hello(
+      siteFingerprint: 111,
+      ephemeralNodeId: 1,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    const helloB = Hello(
+      siteFingerprint: 111,
+      ephemeralNodeId: 2,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    const helloC = Hello(
+      siteFingerprint: 111,
+      ephemeralNodeId: 3,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    final bStore = _RecordingStore();
+    final cStore = _RecordingStore();
+    final coordinatorA = _coordinator(localHello: helloA);
+    final coordinatorB = _coordinator(localHello: helloB, store: bStore);
+    final coordinatorC = _coordinator(localHello: helloC, store: cStore);
+    addTearDown(() async {
+      await coordinatorA.stop();
+      await coordinatorB.stop();
+      await coordinatorC.stop();
+    });
+
+    final (aToB, bToA) = _pairedLinks();
+    final (bToC, cToB) = _pairedLinks();
+    coordinatorA.attach('peer-b', aToB, siteFingerprint: 111);
+    coordinatorB.attach('peer-a', bToA, siteFingerprint: 111);
+    coordinatorB.attach('peer-c', bToC, siteFingerprint: 111);
+    coordinatorC.attach('peer-b', cToB, siteFingerprint: 111);
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final fromB = coordinatorB.incoming.first;
+    final fromC = coordinatorC.incoming.first;
+    final source = _envelope(
+      objectId: 4242,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      hopLimit: 2,
+    );
+    await coordinatorA.send(source);
+
+    expect(
+      (await fromB.timeout(const Duration(seconds: 2))).envelope.objectId,
+      source.objectId,
+    );
+    final receivedC = await fromC.timeout(const Duration(seconds: 2));
+    expect(receivedC.envelope.objectId, source.objectId);
+    expect(receivedC.envelope.hopCount, 1);
+    expect(bStore.stored.single.objectId, source.objectId);
+    expect(cStore.stored.single.objectId, source.objectId);
+    expect(
+      bToA.sentFrames
+          .map(FrameCodec.decode)
+          .any(
+            (frame) =>
+                frame.type == FrameType.custodyAck &&
+                frame.objectId == source.objectId,
+          ),
+      isTrue,
+    );
+    expect(
+      (await coordinatorB.peerState.first)
+          .where((peer) => peer.peerId == 'peer-c')
+          .single
+          .protocolVerified,
+      isTrue,
+    );
+  });
+
   test(
     'custody ACK returns to the source after receiver persistence',
     () async {
@@ -545,8 +621,7 @@ void main() {
   });
 
   test(
-    'log-only: a peer sending real traffic without ever sending HELLO is '
-    'flagged but not dropped',
+    'rejects a peer sending traffic before same-site HELLO verification',
     () async {
       final metrics = <RelayMetric>[];
       final coordinator = _coordinator(
@@ -573,7 +648,9 @@ void main() {
             objectId: 7,
             sequence: 0,
             count: 1,
-            payload: Uint8List(0),
+            payload: (ByteData(
+              8,
+            )..setInt64(0, 7, Endian.big)).buffer.asUint8List(),
           ),
         ),
       );
@@ -581,59 +658,15 @@ void main() {
 
       expect(
         metrics.any(
-          (m) => m.kind == 'peer_unverified_site' && m.peerId == 'peer-b',
+          (m) =>
+              m.kind == 'peer_hello_rejected' &&
+              m.peerId == 'peer-b' &&
+              m.detail == 'traffic_before_hello',
         ),
         isTrue,
       );
-      // Log-only: the connection must remain open and untouched.
-      expect(link.closed, isFalse);
-      expect(coordinator.peerCount, 1);
-
-      metrics.clear();
-      final validHello = const Hello(
-        siteFingerprint: 111,
-        ephemeralNodeId: 2,
-        capabilities: 1,
-        nowEpochSec: 0,
-      );
-      link.deliver(
-        FrameCodec.encode(
-          MeshFrame(
-            type: FrameType.hello,
-            priority: 0,
-            flags: 0,
-            objectId: validHello.ephemeralNodeId,
-            sequence: 0,
-            count: 1,
-            payload: HelloCodec.encode(validHello),
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(link.closed, isFalse);
-      expect(coordinator.peerCount, 1);
-
-      metrics.clear();
-      link.deliver(
-        FrameCodec.encode(
-          MeshFrame(
-            type: FrameType.custodyAck,
-            priority: 0,
-            flags: 0,
-            objectId: 8,
-            sequence: 0,
-            count: 1,
-            payload: Uint8List(0),
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      // After a valid same-site HELLO, subsequent traffic is verified and
-      // no longer flagged.
-      expect(
-        metrics.any((m) => m.kind == 'peer_unverified_site'),
-        isFalse,
-      );
+      expect(link.closed, isTrue);
+      expect(coordinator.peerCount, 0);
     },
   );
 
@@ -1301,8 +1334,8 @@ void main() {
           priority: PriorityBand.p2Normal,
           payloadType: PayloadType.roomMessage,
           // At MTU 23 only four encrypted-object bytes fit in a frame. The
-          // encrypted payload needs >512 chunks, so fragment() rejects it.
-          payloadSize: 3000,
+          // encrypted payload needs more than the 3968-chunk safety limit.
+          payloadSize: 20000,
         ),
       );
 

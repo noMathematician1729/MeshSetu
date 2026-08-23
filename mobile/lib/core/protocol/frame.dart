@@ -9,9 +9,17 @@ import 'dart:typed_data';
 /// `objectId` (Kotlin `ULong`) maps to a plain Dart `int`.
 const int frameHeaderBytes = 16;
 const int frameVersion = 1;
-const int maxChunks = 512;
+// A 10 KiB object at the ATT default MTU uses 2,500 four-byte fragments.
+// Keep the limit below uint16 while allowing low-MTU phones to exchange the
+// same bounded object as high-MTU phones.
+const int maxChunks = 3968;
+const int maxVoiceChunks = 512;
 const int maxObjectBytes = 64 * 1024;
 const int maxGattAttributeValueBytes = 512;
+const int helloCapabilityRelay = 1;
+const int helloCapabilityVoice = 1 << 3;
+const int helloKnownCapabilityMask =
+    helloCapabilityRelay | helloCapabilityVoice;
 
 enum FrameType {
   data(1),
@@ -126,11 +134,16 @@ class MeshFrame {
 
 abstract final class FrameCodec {
   static Uint8List encode(MeshFrame frame) {
-    if (frame.priority > 5) throw ArgumentError('priority out of range');
-    if (frame.objectId <= 0) {
+    if (frame.priority < 0 || frame.priority > 5) {
+      throw ArgumentError('priority out of range');
+    }
+    if (frame.flags < 0 || frame.flags > 0xFF) {
+      throw ArgumentError('flags out of range');
+    }
+    if (frame.objectId <= 0 || frame.objectId > 0x7FFFFFFFFFFFFFFF) {
       throw ArgumentError('objectId must be a positive int64');
     }
-    if (frame.count < 1 || frame.count > maxChunks) {
+    if (frame.count < 1 || frame.count > maxChunks || frame.sequence < 0) {
       throw ArgumentError('count out of range');
     }
     if (frame.sequence >= frame.count) {
@@ -139,6 +152,10 @@ abstract final class FrameCodec {
     if (frame.payload.length > 0xFFFF) {
       throw ArgumentError('payload too large for uint16 field');
     }
+    if (frameHeaderBytes + frame.payload.length > maxGattAttributeValueBytes) {
+      throw ArgumentError('frame exceeds GATT attribute limit');
+    }
+    _validatePayload(frame);
     final out = ByteData(frameHeaderBytes + frame.payload.length);
     out.setUint8(0, frameVersion);
     out.setUint8(1, frame.type.wire);
@@ -155,6 +172,9 @@ abstract final class FrameCodec {
   static MeshFrame decode(Uint8List bytes) {
     if (bytes.length < frameHeaderBytes) {
       throw ArgumentError('frame is shorter than header');
+    }
+    if (bytes.length > maxGattAttributeValueBytes) {
+      throw ArgumentError('frame exceeds GATT attribute limit');
     }
     final input = ByteData.sublistView(bytes);
     if (input.getUint8(0) != frameVersion) {
@@ -175,7 +195,7 @@ abstract final class FrameCodec {
     if (sequence >= count) {
       throw ArgumentError('sequence outside chunk count');
     }
-    return MeshFrame(
+    final frame = MeshFrame(
       type: type,
       priority: priority,
       flags: flags,
@@ -184,10 +204,49 @@ abstract final class FrameCodec {
       count: count,
       payload: Uint8List.sublistView(bytes, frameHeaderBytes),
     );
+    _validatePayload(frame);
+    return frame;
+  }
+
+  static void _validatePayload(MeshFrame frame) {
+    switch (frame.type) {
+      case FrameType.data:
+        if (frame.payload.isEmpty) {
+          throw ArgumentError('data frame payload must not be empty');
+        }
+      case FrameType.hello:
+        if (frame.priority != 0 ||
+            frame.flags != 0 ||
+            frame.sequence != 0 ||
+            frame.count != 1 ||
+            frame.payload.length != 33) {
+          throw ArgumentError('invalid hello frame');
+        }
+      case FrameType.custodyAck:
+        if (frame.priority > 5 ||
+            frame.flags != 0 ||
+            frame.sequence != 0 ||
+            frame.count != 1 ||
+            frame.payload.length != 8) {
+          throw ArgumentError('invalid custody ack frame');
+        }
+      case FrameType.nack:
+        if (frame.sequence != 0 ||
+            frame.count != 1 ||
+            frame.payload.isEmpty ||
+            frame.payload.length > (maxChunks + 7) ~/ 8) {
+          throw ArgumentError('invalid nack frame');
+        }
+      case FrameType.error:
+        if (frame.sequence != 0 || frame.count != 1 || frame.payload.isEmpty) {
+          throw ArgumentError('invalid error frame');
+        }
+    }
   }
 }
 
 int maxFragmentPayload(int mtu) {
+  if (mtu < 23) throw ArgumentError('ATT MTU must be at least 23');
   // A 517-byte ATT MTU advertises 514 notification bytes, but Android's
   // BluetoothGattServer rejects characteristic values above 512 bytes.
   final attValueBytes = math.min(
@@ -209,7 +268,8 @@ List<MeshFrame> fragment({
   }
   final size = maxFragmentPayload(mtu);
   final count = (encrypted.length + size - 1) ~/ size;
-  if (count < 1 || count > maxChunks) {
+  final chunkLimit = priority == 3 ? maxVoiceChunks : maxChunks;
+  if (count < 1 || count > chunkLimit) {
     throw ArgumentError('object requires too many chunks');
   }
   return List.generate(count, (index) {
@@ -249,8 +309,12 @@ class ReassemblyBuffer {
 
   int get received => _received;
 
+  bool hasSequence(int sequence) =>
+      sequence >= 0 && sequence < _parts.length && _parts[sequence] != null;
+
   bool add(MeshFrame frame) {
     if ((objectId != null && frame.objectId != objectId) ||
+        frame.type != FrameType.data ||
         frame.count != expectedCount ||
         frame.sequence < 0 ||
         frame.sequence >= _parts.length ||

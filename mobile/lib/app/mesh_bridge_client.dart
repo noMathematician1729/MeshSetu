@@ -28,6 +28,8 @@ class MeshPeerSnapshot {
   const MeshPeerSnapshot({
     required this.peerId,
     required this.connected,
+    this.lifecycle = 'ready',
+    this.protocolVerified = false,
     required this.rssi,
     this.txPowerAtOneMeter,
     required this.lastSeenMs,
@@ -35,6 +37,8 @@ class MeshPeerSnapshot {
 
   final String peerId;
   final bool connected;
+  final String lifecycle;
+  final bool protocolVerified;
 
   /// Raw BLE RSSI in dBm, or null if the platform did not report one for
   /// this peer (e.g. server-side sessions before a scan result arrives).
@@ -238,7 +242,7 @@ class MeshBridgeClient {
       _adminDeliveryTimer = null;
       return;
     }
-    unawaited(_syncRelayInbox());
+    if (syncRelayInbox) unawaited(_syncRelayInbox());
     // Attaching the gateway is the trigger for anything queued while this
     // device had no admin route configured.
     _ensureAdminDeliveryTimer();
@@ -247,7 +251,7 @@ class MeshBridgeClient {
 
   void start({required String siteId, required int localEphemeralId}) {
     _ensureTaskDataListener();
-    _siteId = siteId;
+    _switchSite(siteId);
     _localEphemeralId = localEphemeralId;
     _activateOutbox();
   }
@@ -258,8 +262,22 @@ class MeshBridgeClient {
   void prepareForSite({required String siteId}) {
     _ensureTaskDataListener();
     final changed = _siteId != siteId;
-    _siteId = siteId;
+    _switchSite(siteId);
     if (changed && _localEphemeralId != null) _activateOutbox();
+  }
+
+  void _switchSite(String siteId) {
+    if (_siteId == siteId) return;
+    _failPendingSubmissions(
+      const MeshTransportUnavailable('mesh site changed'),
+    );
+    _siteId = siteId;
+    _storedObjectIds.clear();
+    _forwardedObjectIds.clear();
+    _forwardingObjectIds.clear();
+    _pendingOriginForwards.clear();
+    _adminDeliveredEventIds.clear();
+    _sosEventIds.clear();
   }
 
   /// Requests the identity from an already-running foreground task. This is
@@ -335,11 +353,22 @@ class MeshBridgeClient {
     // Site changes can queue multiple asynchronous restarts. Do not install
     // an older sender after a newer site has already been selected.
     if (siteId != _siteId || localEphemeralId != _localEphemeralId) return;
+    var recoverRelaying = true;
+    try {
+      recoverRelaying = !(await FlutterForegroundTask.isRunningService);
+    } catch (_) {
+      // The UI isolate can be initialized before the foreground-task
+      // platform channel is available (and pure Dart tests have no channel at
+      // all). Recovering relaying rows is the safe default in that case.
+      recoverRelaying = true;
+    }
+    if (siteId != _siteId || localEphemeralId != _localEphemeralId) return;
     _outbox = OutboxSender(
       _db,
       _sendToMesh,
       siteId: siteId,
       localEphemeralId: localEphemeralId,
+      recoverRelaying: recoverRelaying,
       onDeliveryFailure: (row, error) {
         unawaited(
           _emitSosDelivery(
@@ -390,6 +419,9 @@ class MeshBridgeClient {
   }
 
   Future<void> _sendToMesh(MeshEnvelope envelope) async {
+    if (_siteId != null && envelope.siteId != _siteId) {
+      throw StateError('mesh envelope belongs to another site');
+    }
     if (envelope.payloadType == PayloadType.structuredSos) {
       _sosEventIds[envelope.objectId] = envelope.eventId;
     }
@@ -408,6 +440,11 @@ class MeshBridgeClient {
     }
     if (!await FlutterForegroundTask.isRunningService) {
       throw const MeshTransportUnavailable('event mode is not running');
+    }
+    final existing = _pendingSubmissions[envelope.objectId];
+    if (existing != null) {
+      await existing.future;
+      return;
     }
     final pending = Completer<void>();
     _pendingSubmissions[envelope.objectId] = pending;
@@ -502,6 +539,10 @@ class MeshBridgeClient {
             MeshPeerSnapshot(
               peerId: '${peer['peerId'] ?? ''}',
               connected: peer['connected'] == null || peer['connected'] == true,
+              lifecycle: '${peer['lifecycle'] ?? 'ready'}',
+              protocolVerified: peer['protocolVerified'] == null
+                  ? peer['connected'] == null || peer['connected'] == true
+                  : peer['protocolVerified'] == true,
               rssi: (peer['rssi'] as num?)?.toInt(),
               txPowerAtOneMeter: (peer['txPowerAtOneMeter'] as num?)?.toInt(),
               lastSeenMs: (peer['lastSeenMs'] as num?)?.toInt() ?? 0,
@@ -512,14 +553,18 @@ class MeshBridgeClient {
             eventModeRunning: true,
             peerCount: peerMaps.where((peer) {
               final connected = peer['connected'];
-              return connected == null || connected == true;
+              final verified = peer['protocolVerified'];
+              return (connected == null || connected == true) &&
+                  (verified == null || verified == true);
             }).length,
             peers: snapshots,
           ),
         );
         final connectedCount = peerMaps.where((peer) {
           final connected = peer['connected'];
-          return connected == null || connected == true;
+          final verified = peer['protocolVerified'];
+          return (connected == null || connected == true) &&
+              (verified == null || verified == true);
         }).length;
         unawaited(_outbox?.onPeerCountChanged(connectedCount));
       case 'mesh_metric':
@@ -681,7 +726,9 @@ class MeshBridgeClient {
   /// Plaintext backstop for SOS rows this device authored that the control
   /// room has not accepted yet in this session.
   Future<void> _deliverOutboxSosToAdmin(GatewayBridge bridge) async {
-    final rows = await _db.finalizedSosEvents();
+    final siteId = _siteId;
+    if (siteId == null) return;
+    final rows = await _db.finalizedSosEvents(siteId);
     for (final row in rows) {
       final objectId = row.objectId;
       final payload = row.payload;
@@ -775,11 +822,16 @@ class MeshBridgeClient {
   /// writes each decrypted/authenticated envelope atomically before ACKing,
   /// so replaying these files makes delivery into Drift lossless.
   Future<void> _syncRelayInbox() async {
-    if (_syncingInbox || _siteId == null) return;
+    final siteId = _siteId;
+    if (_syncingInbox || siteId == null) return;
     _syncingInbox = true;
     try {
       final documents = await getApplicationDocumentsDirectory();
-      final directory = Directory('${documents.path}/mesh-relay/inbox');
+      final root = FileRelayStore.scopedDirectory(
+        Directory('${documents.path}/mesh-relay'),
+        siteId,
+      );
+      final directory = Directory('${root.path}/inbox');
       if (await directory.exists()) {
         await for (final entity in directory.list()) {
           if (entity is! File || !entity.path.endsWith('.bin')) continue;
@@ -810,7 +862,7 @@ class MeshBridgeClient {
           }
         }
       }
-      await _syncRelayAcknowledgements(documents);
+      await _syncRelayAcknowledgements(root);
     } finally {
       _syncingInbox = false;
     }
@@ -820,10 +872,10 @@ class MeshBridgeClient {
   /// paused, so the task writes a tiny durable marker beside its relay store.
   /// Consume it here instead of relying solely on the best-effort task-data
   /// callback.
-  Future<void> _syncRelayAcknowledgements(Directory documents) async {
+  Future<void> _syncRelayAcknowledgements(Directory relayRoot) async {
     final outbox = _outbox;
     if (outbox == null) return;
-    final directory = Directory('${documents.path}/mesh-relay/acks');
+    final directory = Directory('${relayRoot.path}/acks');
     if (!await directory.exists()) return;
     await for (final entity in directory.list()) {
       if (entity is! File || !entity.path.endsWith('.ack')) continue;
@@ -848,6 +900,7 @@ class MeshBridgeClient {
   }
 
   Future<void> _storeReceived(ReceivedObject received) async {
+    if (_siteId != null && received.envelope.siteId != _siteId) return;
     final objectId = received.envelope.objectId;
     if (_storedObjectIds.add(objectId)) {
       try {

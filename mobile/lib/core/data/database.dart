@@ -77,6 +77,23 @@ class MeshDatabase extends _$MeshDatabase {
     outboxEvents,
   )..where((t) => t.siteId.equals(siteId) & t.state.equals('ready'))).watch();
 
+  Future<int> markRelayingIfPending(String siteId, int objectId, int nowMs) =>
+      (update(outboxEvents)..where(
+            (t) =>
+                t.siteId.equals(siteId) &
+                t.objectId.equals(objectId) &
+                t.state.isIn(const {'ready', 'queued'}),
+          ))
+          .write(
+            OutboxEventsCompanion(
+              state: const Value('relaying'),
+              updatedAtMs: Value(nowMs),
+            ),
+          );
+
+  /// Legacy queued rows are promoted when a usable peer appears. New
+  /// foreground submissions use [markRelayingIfPending] immediately after
+  /// acceptance, so they cannot be submitted twice during a bridge race.
   Future<void> markQueuedIfReady(String eventId, int nowMs) =>
       (update(outboxEvents)
             ..where((t) => t.eventId.equals(eventId) & t.state.equals('ready')))
@@ -123,6 +140,21 @@ class MeshDatabase extends _$MeshDatabase {
         OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(nowMs)),
       );
 
+  Future<int> markStateForSite(
+    String siteId,
+    String eventId,
+    String state,
+    int nowMs,
+  ) =>
+      (update(outboxEvents)
+            ..where((t) => t.siteId.equals(siteId) & t.eventId.equals(eventId)))
+          .write(
+            OutboxEventsCompanion(
+              state: Value(state),
+              updatedAtMs: Value(nowMs),
+            ),
+          );
+
   Future<void> expireOverdue(int nowMs) =>
       (update(outboxEvents)..where(
             (t) =>
@@ -168,10 +200,11 @@ class MeshDatabase extends _$MeshDatabase {
   /// Delivery to the admin backend is independent of mesh custody: a row with
   /// no peer to relay through still needs to reach the dashboard as soon as
   /// this device has internet.
-  Future<List<OutboxEvent>> finalizedSosEvents() =>
+  Future<List<OutboxEvent>> finalizedSosEvents(String siteId) =>
       (select(outboxEvents)..where(
             (t) =>
                 t.payloadType.equals('structuredSos') &
+                t.siteId.equals(siteId) &
                 t.state.isNotValue('created'),
           ))
           .get();

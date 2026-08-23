@@ -9,6 +9,7 @@ import android.bluetooth.le.ScanSettings
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.util.LinkedList
 
@@ -33,13 +34,13 @@ private const val TAG = "UniversalBlePlugin"
  */
 @SuppressLint("MissingPermission")
 class SafeScanner(private val bluetoothManager: BluetoothManager) {
-    private val handler = Handler(Looper.myLooper()!!)
+    private val handler = Handler(Looper.getMainLooper())
     private val startTimes = LinkedList<Long>()
     private var awaitingScan = false
     private var isScanning = false
 
     fun startScan(filters: List<ScanFilter>, settings: ScanSettings, callback: ScanCallback) {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         startTimes.removeAll { now - it > EXCESSIVE_SCANNING_PERIOD_MS }
 
         if (startTimes.size >= NUM_SCAN_DURATIONS_KEPT) {

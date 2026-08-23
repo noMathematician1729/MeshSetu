@@ -91,6 +91,7 @@ void main() {
       registerTaskDataCallback: false,
       syncRelayInbox: false,
     );
+    client.prepareForSite(siteId: 'demo-site');
   });
 
   tearDown(() async {

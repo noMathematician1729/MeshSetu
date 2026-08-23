@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
@@ -158,4 +159,75 @@ void main() {
       expect(foreign.state, 'ready');
     },
   );
+
+  test(
+    'claims a ready row before sending so concurrent senders cannot duplicate it',
+    () async {
+      var sends = 0;
+      final sendGate = Completer<void>();
+      Future<void> send(MeshEnvelope _) async {
+        sends++;
+        await sendGate.future;
+      }
+
+      final first = OutboxSender(
+        database,
+        send,
+        siteId: 'site-a',
+        localEphemeralId: 7,
+      );
+      final second = OutboxSender(
+        database,
+        send,
+        siteId: 'site-a',
+        localEphemeralId: 8,
+      );
+      addTearDown(() async {
+        await first.dispose();
+        await second.dispose();
+      });
+      await _insertReady(database, eventId: 'race-sos', siteId: 'site-a');
+      first.start();
+      second.start();
+
+      await _waitForRow(database, 'race-sos', (row) => row.state == 'relaying');
+      sendGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(sends, 1);
+    },
+  );
+
+  test('recovery only promotes relaying rows for the active site', () async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _insertReady(database, eventId: 'recover-site-a', siteId: 'site-a');
+    await database.markState('recover-site-a', 'relaying', now);
+    await _insertReady(database, eventId: 'recover-site-b', siteId: 'site-b');
+    await database.markState('recover-site-b', 'relaying', now);
+
+    var sends = 0;
+    final sender = OutboxSender(
+      database,
+      (_) async {
+        sends++;
+      },
+      siteId: 'site-a',
+      localEphemeralId: 7,
+      recoverRelaying: true,
+    );
+    addTearDown(sender.dispose);
+    sender.start();
+    final siteA = await _waitForRow(
+      database,
+      'recover-site-a',
+      (row) => row.state == 'relaying',
+    );
+    final siteB = await (database.select(
+      database.outboxEvents,
+    )..where((row) => row.eventId.equals('recover-site-b'))).getSingle();
+
+    expect(siteA.state, 'relaying');
+    expect(siteB.state, 'relaying');
+    expect(sends, 1);
+  });
 }
