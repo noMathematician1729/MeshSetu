@@ -251,10 +251,6 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           SosIncidentNavigator.openCompactAlert(alert);
         }
         unawaited(_forwardReceivedCealSos(data));
-        // Belt-and-suspenders: also send device-native SMS immediately from
-        // this phone's SIM so emergency contacts are notified even when the
-        // admin server is unreachable or internet is down on the relay device.
-        unawaited(_sendDeviceSmsForCompactSos(data));
       case 'compact_sos_notification_failed':
         setState(() {
           _status =
@@ -532,6 +528,18 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               : 'Verified details could not be retrieved. This compact packet remains usable without internet.',
         );
       }
+      // The resolved profile is what makes a useful SMS possible: it carries
+      // the victim's name, phone, medical record, and — critically — who to
+      // notify. Sending is chained here rather than run as an independent
+      // task, which previously texted this relayer's own contacts with an
+      // "Unknown" victim and no location.
+      if (resolved) {
+        await _sendDeviceSmsForResolvedSos(
+          body: body,
+          reporterUid: reporterUid,
+          sequence: sequence,
+        );
+      }
       if (mounted) {
         setState(
           () => _status = resolved
@@ -551,43 +559,46 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
-  /// Sends a device-native SMS from this phone's SIM to every emergency
-  /// contact in the locally stored onboarding profile when a compact SOS is
-  /// relayed through this device.
+  /// Sends a device-native SMS from this phone's SIM to the *victim's*
+  /// emergency contacts once the control room has resolved who sent the
+  /// compact SOS this device relayed.
   ///
-  /// This fires in addition to the admin-server forwarding path so contacts
-  /// are reached even when the internet gateway is unavailable. The SMS is
-  /// sent from this relay device's own number — no API key or billing account
-  /// required — using Android's [SmsManager] via [DeviceSmsService].
-  Future<void> _sendDeviceSmsForCompactSos(Map data) async {
+  /// The relay device's own contacts are deliberately not used: alerting this
+  /// user's family about a stranger's emergency is both wrong and leaves the
+  /// victim's family uninformed. Contacts come from the resolved profile, and
+  /// the coordinates are this device's own GPS, reported as the *relayer*
+  /// position because the 20-byte compact advert carries no victim location.
+  Future<void> _sendDeviceSmsForResolvedSos({
+    required Map<String, Object?>? body,
+    required String reporterUid,
+    int? sequence,
+  }) async {
     try {
-      final profile = await _onboardingRepository.load();
-      if (profile == null || profile.emergencyContacts.isEmpty) return;
+      final profile = body?['profile'];
+      if (profile is! Map) return;
+      final victim = profile.cast<String, Object?>();
+      final phones = _emergencyContactPhones(victim);
+      if (phones.isEmpty) return;
 
-      // Build a compact body with whatever location the compact alert carries.
-      final lat = (data['latitude'] as num?)?.toDouble();
-      final lon = (data['longitude'] as num?)?.toDouble();
-      final flags = data['flags'] as int? ?? 0;
-      // Derive a human-readable emergency type from the SOS flags using the
-      // same mapping the admin server uses for CEAL alerts.
-      final emergencyType = _emergencyTypeLabel(flags);
-
-      final body = DeviceSmsService.buildBody(
-        reporterName: 'Unknown — nearby SOS',
-        latitude: lat,
-        longitude: lon,
-        emergencyType: emergencyType,
+      final location = await _captureRelayLocation();
+      final message = DeviceSmsService.buildRelayAlertBody(
+        victimName: victim['name'] as String? ?? '',
+        victimPhone: victim['phone'] as String?,
+        bloodGroup: victim['blood_group'] as String?,
+        allergies: victim['allergies'] as String?,
+        conditions: victim['conditions'] as String?,
+        relayLatitude: location?.latitude,
+        relayLongitude: location?.longitude,
+        reporterUid: reporterUid,
+        sequence: sequence,
       );
 
-      final phones = [
-        for (final contact in profile.emergencyContacts) contact.phone,
-      ];
-
-      final sent = await DeviceSmsService.sendToAll(phones, body);
+      final sent = await DeviceSmsService.sendToAll(phones, message);
       if (sent > 0 && mounted) {
         setState(
           () => _status =
-              'MeshSetu\nSOS relayed · $sent contact${sent == 1 ? '' : 's'} notified via device SMS',
+              'MeshSetu\nSOS relayed · $sent emergency contact'
+              '${sent == 1 ? '' : 's'} of the victim notified by SMS',
         );
       }
     } catch (_) {
@@ -596,18 +607,33 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
-  static String _emergencyTypeLabel(int flags) {
-    // Mirrors the CEAL flag→type mapping in admin/server/src/server.ts.
-    const types = [
-      'general',
-      'fire',
-      'crime',
-      'kidnap',
-      'medical',
-      'natural_disaster',
-    ];
-    final index = (flags >> 2) & 0x0f;
-    return index < types.length ? types[index] : 'general';
+  /// Emergency contact numbers from a resolved profile, including the primary
+  /// contact, de-duplicated so one person is not texted twice.
+  static List<String> _emergencyContactPhones(Map<String, Object?> profile) {
+    final phones = <String>{};
+    final primary = (profile['primary_contact_phone'] as String? ?? '').trim();
+    if (primary.isNotEmpty) phones.add(primary);
+    final contacts = profile['emergency_contacts'];
+    if (contacts is List) {
+      for (final contact in contacts) {
+        if (contact is! Map) continue;
+        final phone = (contact['phone'] as String? ?? '').trim();
+        if (phone.isNotEmpty) phones.add(phone);
+      }
+    }
+    return phones.toList(growable: false);
+  }
+
+  /// This device's position, used as the "relayer location". Best-effort: an
+  /// SOS alert must still go out with medical details when GPS is denied.
+  Future<SosLocation?> _captureRelayLocation() async {
+    try {
+      final permission = await Permission.locationWhenInUse.request();
+      if (!permission.isGranted) return null;
+      return (await const LocationCapture().capture()).location;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Replaces the "you are relaying" alert with the decrypted/resolved

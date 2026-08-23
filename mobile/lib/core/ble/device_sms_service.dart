@@ -17,37 +17,57 @@ import 'package:flutter/services.dart';
 abstract final class DeviceSmsService {
   static const _channel = MethodChannel('meshsetu/device-sms');
 
-  /// Builds the SMS body from a received SOS alert.
+  /// Builds the relay alert sent to a *victim's* emergency contacts when this
+  /// phone relays their compact BLE SOS and has internet to resolve who they
+  /// are.
   ///
-  /// Plain ASCII, no emoji, single GSM-7 segment (≤160 chars) — mirrors the
-  /// `Ceal/backend/src/services/twilio.ts` format that is proven to deliver
-  /// on Indian carriers without content filtering.
-  static String buildBody({
-    required String reporterName,
-    double? latitude,
-    double? longitude,
-    String? emergencyType,
+  /// The compact BLE advertisement is 20 bytes and carries no name, medical
+  /// record, or coordinates — only a reporter UID and sequence. Everything
+  /// identifying comes from the control-room profile lookup, and the position
+  /// is *this relay device's* GPS, which is why it is labelled as such: it
+  /// says where the alert was heard, not where the victim is.
+  ///
+  /// Deliberately multi-segment: the contact needs medical details and a map
+  /// link more than the message needs to fit one SMS segment. Android splits
+  /// it with `divideMessage`, so no truncation happens here.
+  static String buildRelayAlertBody({
+    required String victimName,
+    String? victimPhone,
+    String? bloodGroup,
+    String? allergies,
+    String? conditions,
+    double? relayLatitude,
+    double? relayLongitude,
+    String? reporterUid,
+    int? sequence,
+    DateTime? at,
   }) {
-    final hasLocation = latitude != null && longitude != null;
-    final coords = hasLocation
-        ? '${latitude.toStringAsFixed(5)},${longitude.toStringAsFixed(5)}'
-        : null;
-    final mapsUrl = coords != null
-        ? 'https://maps.google.com/?q=$coords'
-        : null;
-
-    final parts = <String>[
-      'EMERGENCY: $reporterName needs help.',
-      if (emergencyType != null && emergencyType.isNotEmpty)
-        'Type: $emergencyType',
-      if (coords != null) coords,
-      if (mapsUrl != null) mapsUrl,
-      'Call 112.',
+    final hasLocation = relayLatitude != null && relayLongitude != null;
+    final timestamp = (at ?? DateTime.now()).toUtc().toIso8601String();
+    final lines = <String>[
+      'EMERGENCY SOS — Meshsetu',
+      'Victim: ${_valueOr(victimName, 'Unknown')}',
+      'Phone: ${_valueOr(victimPhone, 'Unknown')}',
+      'Blood group: ${_valueOr(bloodGroup, 'Unknown')}',
+      'Allergies: ${_valueOr(allergies, 'none')}',
+      'Conditions: ${_valueOr(conditions, 'none')}',
+      if (hasLocation)
+        'Relayer location: ${relayLatitude.toStringAsFixed(5)}, '
+            '${relayLongitude.toStringAsFixed(5)}'
+      else
+        'Relayer location: unavailable',
+      if (hasLocation)
+        'https://maps.google.com/?q=$relayLatitude,$relayLongitude',
+      'Time: $timestamp',
+      if (reporterUid != null && reporterUid.isNotEmpty)
+        'ID: uid:$reporterUid:${sequence ?? 0}',
     ];
+    return lines.join('\n');
+  }
 
-    // Enforce a single GSM-7 segment to avoid multi-part carrier filtering.
-    final body = parts.join('\n');
-    return body.length <= 160 ? body : body.substring(0, 160);
+  static String _valueOr(String? value, String fallback) {
+    final trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? fallback : trimmed;
   }
 
   /// Sends [message] to each phone number in [phones] using the device SIM.
