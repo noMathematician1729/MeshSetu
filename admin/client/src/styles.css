@@ -1041,12 +1041,12 @@ a {
 }
 
 .login-heading em {
-  font-family: var(--font-editorialnew);
-  font-weight: 300;
-  font-style: italic;
-  text-transform: lowercase;
+  font-family: var(--font-kmr-waldenburg);
+  font-weight: 700;
+  font-style: normal;
+  text-transform: uppercase;
   color: var(--color-ash);
-  letter-spacing: -1px;
+  letter-spacing: -3px;
 }
 
 .login-card form {
