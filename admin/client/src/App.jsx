@@ -294,9 +294,6 @@ function ControlRoom({ onLogout }) {
 
   const visible = sortEvents(events.filter(e => filter === 'all' || e.status === filter))
   const selected = visible.find(e => e.event_id === selectedId) || visible[0]
-  const critical = events.filter(e => e.priority === 'p0Critical' && e.status !== 'resolved').length
-  const verified = events.filter(e => e.decrypt_status === 'verified').length
-  const openCount = events.filter(e => e.status !== 'resolved').length
 
   const update = async status => {
     try {
@@ -341,8 +338,6 @@ function ControlRoom({ onLogout }) {
           <Badge tone={connection === 'live' ? 'live' : 'warn'}>
             ● {connection === 'live' ? 'LIVE SYNC' : connection.toUpperCase()}
           </Badge>
-          <span className="telemetry-item">DEMO01 NAMESPACE</span>
-          <span className="telemetry-item">BLUETOOTH LE OVERLAY</span>
         </div>
 
         <div className="nav-actions">
@@ -356,24 +351,6 @@ function ControlRoom({ onLogout }) {
       </header>
 
       <main className="main-content">
-        {/* Page Typographic Statement */}
-        <section className="hero-statement">
-          <div className="hero-text-block">
-            <span className="eyebrow">LOCAL RESPONSE INFRASTRUCTURE · OFFLINE RELAY</span>
-            <h1 className="hero-headline">
-              Situation <em>room.</em>
-            </h1>
-          </div>
-        </section>
-
-        {/* High-Contrast Editorial Metrics Strip */}
-        <section className="metrics-strip">
-          <Metric label="Active queue" value={String(openCount).padStart(2, '0')} note="unresolved incidents" />
-          <Metric label="Critical priority" value={String(critical).padStart(2, '0')} tone={critical > 0 ? 'red' : ''} note="immediate threat to life" />
-          <Metric label="Verified packets" value={String(verified).padStart(2, '0')} note="AEAD encrypted & valid" />
-          <Metric label="Transport state" value={connection === 'live' ? 'ONLINE' : 'SYNCING'} tone="light" note="local gateway linked" />
-        </section>
-
         {error && (
           <div className="notice error-banner">
             <span>! {error}</span>
@@ -454,28 +431,7 @@ function ControlRoom({ onLogout }) {
             voiceUrl={voiceUrl}
           />
         </div>
-
-        {/* Minimal Editorial Footer */}
-        <footer className="page-footer">
-          <div className="footer-left">
-            <span>MESHSETU / OFFLINE-FIRST DISASTER RESPONSE</span>
-            <span className="footer-sub">APPLICATION-LAYER BLE MESH OVERLAY · PROTOCOL VERIFIED</span>
-          </div>
-          <div className="footer-right">
-            <span>HUMAN DISPATCH AUTHORITY FINAL</span>
-          </div>
-        </footer>
       </main>
-    </div>
-  )
-}
-
-function Metric({ label, value, note, tone = '' }) {
-  return (
-    <div className={`metric-cell ${tone}`}>
-      <span className="metric-label">{label}</span>
-      <strong className="metric-value">{value}</strong>
-      <small className="metric-note">— {note}</small>
     </div>
   )
 }

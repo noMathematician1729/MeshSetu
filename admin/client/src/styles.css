@@ -1379,3 +1379,15 @@ a {
   }
 }
 
+/* Compact, single-screen control room */
+.app-shell, .app-shell * { font-style: normal; }
+.hero-headline em, .incident-snippet, .detail-connective em, .transcript-text { font-family: var(--font-kmr-waldenburg); font-style: normal; }
+@media (min-width: 769px) {
+  .app-shell { height: 100vh; overflow: hidden; }
+  .main-content { flex: 1; min-height: 0; padding: 24px 48px; gap: 12px; overflow: hidden; }
+  .console-grid { flex: 1; min-height: 0; }
+  .queue-panel, .detail-panel { height: 100%; min-height: 0; }
+  .queue-panel { display: flex; flex-direction: column; }
+  .incident-list { flex: 1; max-height: none; }
+  .detail-panel { overflow-y: auto; }
+}
