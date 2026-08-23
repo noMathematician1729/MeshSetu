@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:universal_ble/universal_ble.dart';
 
 import 'mesh_gatt.dart';
+import 'advertising_budget.dart';
+import 'advertising_tier.dart';
 import 'sos_advertisement.dart';
 import 'async_lock.dart';
 import '../model/model.dart';
@@ -23,7 +26,15 @@ abstract final class MeshAdvertiser {
   static final AsyncLock _advertisingLock = AsyncLock();
   static int _campaignGeneration = 0;
   static bool _sosCampaignActive = false;
+  static bool _sosConcurrentExtended = false;
   static DiscoveryMetadata? _activeMetadata;
+  static BlePeripheralCapabilities? _capabilities;
+  static String _advertisingTier = 'legacy_1m';
+  static String? _extendedFallbackReason;
+
+  static BlePeripheralCapabilities? get capabilities => _capabilities;
+  static String get advertisingTier => _advertisingTier;
+  static String? get extendedFallbackReason => _extendedFallbackReason;
 
   /// The metadata this advertiser has been asked to broadcast, set on every
   /// [start] call regardless of whether the platform confirms advertising.
@@ -38,30 +49,39 @@ abstract final class MeshAdvertiser {
   static bool get isIntendedToAdvertise =>
       _activeMetadata != null || _desiredMetadata != null;
 
-  static Future<void> start(DiscoveryMetadata metadata) =>
-      _advertisingLock.synchronized(() async {
-        ++_campaignGeneration;
-        await _startDiscoveryLocked(metadata);
-      });
+  static Future<void> start(DiscoveryMetadata metadata) {
+    _desiredMetadata = metadata;
+    return _advertisingLock.synchronized(() async {
+      ++_campaignGeneration;
+      await _startDiscoveryLocked(metadata);
+    });
+  }
 
   static Future<void> _startDiscoveryLocked(DiscoveryMetadata metadata) async {
     _desiredMetadata = metadata;
     final previousMetadata = _activeMetadata;
+    final payload = MeshGatt.manufacturerPayload(
+      MeshGatt.discoveryPayloadType,
+      metadata.encode(),
+    );
+    final includeTxPower = BleAdvertisingBudget.fits(
+      manufacturerPayloadBytes: payload.length,
+      includeTxPower: true,
+    );
     try {
+      _capabilities = await UniversalBlePeripheral.getCapabilities();
+      final tierDecision = MeshAdvertisingTierPolicy.select(_capabilities!);
+      final canAttemptExtended = tierDecision.usesExtended;
+      _extendedFallbackReason = tierDecision.reason;
       await _ensureIdleLocked();
       await UniversalBlePeripheral.startAdvertising(
         services: const [MeshGatt.service],
-        manufacturerData: ManufacturerData(
-          MeshGatt.manufacturerId,
-          MeshGatt.manufacturerPayload(
-            MeshGatt.discoveryPayloadType,
-            metadata.encode(),
-          ),
-        ),
+        manufacturerData: ManufacturerData(MeshGatt.manufacturerId, payload),
         platformConfig: PeripheralPlatformConfig(
           android: PeripheralAndroidOptions(
             addManufacturerDataInScanResponse: false,
             addServicesInScanResponse: true,
+            includeTxPowerLevel: includeTxPower,
           ),
         ),
       );
@@ -69,26 +89,75 @@ abstract final class MeshAdvertiser {
       if (state != PeripheralAdvertisingState.advertising) {
         throw StateError('platform advertising state is ${state.name}');
       }
+      _advertisingTier = 'legacy_1m';
+      if (canAttemptExtended) {
+        try {
+          await UniversalBlePeripheral.startExtendedAdvertising(
+            services: const [MeshGatt.service],
+            manufacturerData: ManufacturerData(
+              MeshGatt.manufacturerId,
+              payload,
+            ),
+            platformConfig: PeripheralPlatformConfig(
+              android: PeripheralAndroidOptions(includeTxPowerLevel: true),
+            ),
+          );
+          _advertisingTier = 'legacy_1m+coded_extended';
+        } catch (error) {
+          // Extended advertising is an optimization. A controller can report
+          // support and still reject a second set because of OEM resources.
+          _extendedFallbackReason = error.toString();
+        }
+      } else if (_capabilities?.supportsExtendedAdvertising == true) {
+        _extendedFallbackReason =
+            'coded PHY or multiple-advertiser support unavailable';
+      }
+      _capabilities = await UniversalBlePeripheral.getCapabilities();
       _activeMetadata = metadata;
     } catch (error) {
       _activeMetadata = previousMetadata;
+      // A failed start remains an intent until the caller explicitly calls
+      // stop(), so the liveness watchdog can retry after radio recovery.
+      _desiredMetadata = metadata;
       throw StateError('BLE advertising verification failed: $error');
     }
   }
 
-  static Future<PeripheralAdvertisingState> _waitForAdvertising() async {
-    // 60 attempts × 50 ms = 3 seconds. OEM BLE stacks (especially on first
-    // use after boot) can take 1–2 s to initialise the peripheral role; the
-    // original 1-second window was too tight and caused spurious failures.
-    for (var attempt = 0; attempt < 60; attempt++) {
-      final state = await UniversalBlePeripheral.getAdvertisingState();
-      if (state == PeripheralAdvertisingState.advertising ||
-          state == PeripheralAdvertisingState.error) {
-        return state;
+  static Future<PeripheralAdvertisingState> _waitForAdvertising() =>
+      _waitForState(
+        (state) =>
+            state == PeripheralAdvertisingState.advertising ||
+            state == PeripheralAdvertisingState.error,
+        const Duration(seconds: 3),
+      );
+
+  static Future<PeripheralAdvertisingState> _waitForState(
+    bool Function(PeripheralAdvertisingState state) done,
+    Duration timeout,
+  ) async {
+    final result = Completer<PeripheralAdvertisingState>();
+    late final StreamSubscription<BlePeripheralAdvertisingStateChanged>
+    subscription;
+    subscription = UniversalBlePeripheral.advertisingStateStream.listen((
+      event,
+    ) {
+      if (!result.isCompleted && done(event.state)) {
+        result.complete(event.state);
       }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    Timer? timer;
+    try {
+      final current = await UniversalBlePeripheral.getAdvertisingState();
+      if (done(current)) result.complete(current);
+      timer = Timer(timeout, () async {
+        if (result.isCompleted) return;
+        result.complete(await UniversalBlePeripheral.getAdvertisingState());
+      });
+      return await result.future;
+    } finally {
+      timer?.cancel();
+      await subscription.cancel();
     }
-    return UniversalBlePeripheral.getAdvertisingState();
   }
 
   /// Re-issues [start] with the last-known or desired discovery metadata.
@@ -107,17 +176,12 @@ abstract final class MeshAdvertiser {
     await _startDiscoveryLocked(metadata);
   });
 
-  static Future<PeripheralAdvertisingState> _waitForIdle() async {
-    for (var attempt = 0; attempt < 20; attempt++) {
-      final state = await UniversalBlePeripheral.getAdvertisingState();
-      if (state == PeripheralAdvertisingState.idle ||
-          state == PeripheralAdvertisingState.error) {
-        return state;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    return UniversalBlePeripheral.getAdvertisingState();
-  }
+  static Future<PeripheralAdvertisingState> _waitForIdle() => _waitForState(
+    (state) =>
+        state == PeripheralAdvertisingState.idle ||
+        state == PeripheralAdvertisingState.error,
+    const Duration(seconds: 1),
+  );
 
   static Future<void> _ensureIdleLocked() async {
     Object? lastError;
@@ -141,6 +205,10 @@ abstract final class MeshAdvertiser {
     ++_campaignGeneration;
     _activeMetadata = null;
     _desiredMetadata = null;
+    _capabilities = null;
+    _advertisingTier = 'legacy_1m';
+    _extendedFallbackReason = null;
+    _sosConcurrentExtended = false;
     _sosCampaignActive = false;
     await _ensureIdleLocked();
   });
@@ -180,7 +248,11 @@ abstract final class MeshAdvertiser {
         if (_campaignGeneration != campaign) break;
         await _advertisingLock.synchronized(() async {
           if (_campaignGeneration != campaign) return;
-          await _startDiscoveryLocked(discovery);
+          if (_sosConcurrentExtended) {
+            await _startExtendedDiscoveryLocked(discovery);
+          } else {
+            await _startDiscoveryLocked(discovery);
+          }
         });
         await onRestored?.call();
         await Future<void>.delayed(discoveryBurst);
@@ -189,7 +261,11 @@ abstract final class MeshAdvertiser {
       if (_campaignGeneration == campaign) {
         await _advertisingLock.synchronized(() async {
           if (_campaignGeneration != campaign) return;
-          await _startDiscoveryLocked(discovery);
+          if (_sosConcurrentExtended) {
+            await _startExtendedDiscoveryLocked(discovery);
+          } else {
+            await _startDiscoveryLocked(discovery);
+          }
         });
         await onRestored?.call();
       }
@@ -200,17 +276,34 @@ abstract final class MeshAdvertiser {
   }
 
   static Future<void> _startSosLocked(MeshSosAdvertisement alert) async {
+    final payload = MeshGatt.manufacturerPayload(
+      MeshGatt.sosPayloadType,
+      alert.encode(),
+    );
+    if (_advertisingTier == 'legacy_1m+coded_extended' &&
+        _activeMetadata != null) {
+      try {
+        await _startExtendedPayloadLocked(payload);
+        _sosConcurrentExtended = true;
+        return;
+      } catch (error) {
+        _extendedFallbackReason = 'SOS extended set unavailable: $error';
+        _sosConcurrentExtended = false;
+      }
+    }
+    _sosConcurrentExtended = false;
     await _ensureIdleLocked();
     await UniversalBlePeripheral.startAdvertising(
       services: const [MeshGatt.service],
-      manufacturerData: ManufacturerData(
-        MeshGatt.manufacturerId,
-        MeshGatt.manufacturerPayload(MeshGatt.sosPayloadType, alert.encode()),
-      ),
+      manufacturerData: ManufacturerData(MeshGatt.manufacturerId, payload),
       platformConfig: PeripheralPlatformConfig(
         android: PeripheralAndroidOptions(
           addManufacturerDataInScanResponse: false,
           addServicesInScanResponse: true,
+          includeTxPowerLevel: BleAdvertisingBudget.fits(
+            manufacturerPayloadBytes: payload.length,
+            includeTxPower: true,
+          ),
         ),
       ),
     );
@@ -218,6 +311,28 @@ abstract final class MeshAdvertiser {
     if (state != PeripheralAdvertisingState.advertising) {
       throw StateError('SOS advertising state is ${state.name}');
     }
+  }
+
+  static Future<void> _startExtendedPayloadLocked(Uint8List payload) async {
+    await UniversalBlePeripheral.startExtendedAdvertising(
+      services: const [MeshGatt.service],
+      manufacturerData: ManufacturerData(MeshGatt.manufacturerId, payload),
+      platformConfig: PeripheralPlatformConfig(
+        android: PeripheralAndroidOptions(includeTxPowerLevel: true),
+      ),
+    );
+    _capabilities = await UniversalBlePeripheral.getCapabilities();
+  }
+
+  static Future<void> _startExtendedDiscoveryLocked(
+    DiscoveryMetadata metadata,
+  ) async {
+    final payload = MeshGatt.manufacturerPayload(
+      MeshGatt.discoveryPayloadType,
+      metadata.encode(),
+    );
+    await _startExtendedPayloadLocked(payload);
+    _advertisingTier = 'legacy_1m+coded_extended';
   }
 }
 

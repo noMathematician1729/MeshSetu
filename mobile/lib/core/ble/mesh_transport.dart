@@ -300,6 +300,7 @@ class MeshTransportCoordinator implements MeshTransport {
     PeerLink link, {
     required int siteFingerprint,
     int? rssi,
+    int? txPowerAtOneMeter,
   }) {
     if (_stopped) {
       unawaited(link.close());
@@ -327,6 +328,7 @@ class MeshTransportCoordinator implements MeshTransport {
         connected: true,
         mtu: link.mtu,
         rssi: rssi,
+        txPowerAtOneMeter: txPowerAtOneMeter,
         queuedObjects: relay.scheduler.size(),
         lastSeenMs: DateTime.now().millisecondsSinceEpoch,
       ),
@@ -738,6 +740,7 @@ class MeshTransportCoordinator implements MeshTransport {
       connected: peer.connected,
       mtu: peer.mtu,
       rssi: peer.rssi,
+      txPowerAtOneMeter: peer.txPowerAtOneMeter,
       queuedObjects: relay.scheduler.size(),
       lastSeenMs: DateTime.now().millisecondsSinceEpoch,
     );

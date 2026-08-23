@@ -143,6 +143,7 @@ class _MeshEventTaskHandler extends TaskHandler {
                 'connected': peer.connected,
                 'mtu': peer.mtu,
                 'rssi': peer.rssi,
+                'txPowerAtOneMeter': peer.txPowerAtOneMeter,
                 'queuedObjects': peer.queuedObjects,
                 'lastSeenMs': peer.lastSeenMs,
               },

@@ -37,23 +37,70 @@ class UniversalBlePeripheralPigeon extends UniversalBlePeripheralPlatform
 
   @override
   Future<BlePeripheralCapabilities> getCapabilities() async {
-    final readiness = await getAvailabilityState();
-    final supported = readiness != PeripheralReadinessState.unsupported;
-    final supportsManufacturerDataInScanResponse =
-        defaultTargetPlatform == TargetPlatform.android;
-    final supportsAdvertisingTimeout =
-        defaultTargetPlatform == TargetPlatform.android;
-    return BlePeripheralCapabilities(
-      supportsPeripheralMode: supported,
-      supportsManufacturerDataInAdvertisement: supported,
-      supportsManufacturerDataInScanResponse:
-          supported && supportsManufacturerDataInScanResponse,
-      supportsServiceDataInAdvertisement: false,
-      supportsServiceDataInScanResponse: false,
-      supportsTargetedCharacteristicUpdate: supported,
-      supportsAdvertisingTimeout: supported && supportsAdvertisingTimeout,
+    try {
+      final raw = await _channel.getCapabilities();
+      bool flag(int index, [bool fallback = false]) =>
+          index < raw.length && raw[index] is bool
+          ? raw[index] as bool
+          : fallback;
+      int? integer(int index) => index < raw.length && raw[index] is num
+          ? (raw[index] as num).toInt()
+          : null;
+      return BlePeripheralCapabilities(
+        supportsPeripheralMode: flag(0),
+        supportsManufacturerDataInAdvertisement: flag(1),
+        supportsManufacturerDataInScanResponse: flag(2),
+        supportsServiceDataInAdvertisement: flag(3),
+        supportsServiceDataInScanResponse: flag(4),
+        supportsTargetedCharacteristicUpdate: flag(5),
+        supportsAdvertisingTimeout: flag(6),
+        supportsExtendedAdvertising: flag(7),
+        supportsCodedPhy: flag(8),
+        supports2MPhy: flag(9),
+        supportsMultipleAdvertisement: flag(10),
+        maximumAdvertisingDataLength: integer(11),
+        effectiveTxPowerLevel: integer(12),
+        effectiveExtendedTxPowerLevel: integer(13),
+        extendedAdvertisingActive: flag(14),
+        advertisingTier: raw.length > 15 && raw[15] is String
+            ? raw[15] as String
+            : 'legacy_1m',
+      );
+    } catch (_) {
+      // Older/custom hosts do not have the appended channel yet. Preserve
+      // the previous readiness-derived behavior instead of breaking startup.
+      final readiness = await getAvailabilityState();
+      final supported = readiness != PeripheralReadinessState.unsupported;
+      final android = defaultTargetPlatform == TargetPlatform.android;
+      return BlePeripheralCapabilities(
+        supportsPeripheralMode: supported,
+        supportsManufacturerDataInAdvertisement: supported,
+        supportsManufacturerDataInScanResponse: supported && android,
+        supportsServiceDataInAdvertisement: false,
+        supportsServiceDataInScanResponse: false,
+        supportsTargetedCharacteristicUpdate: supported,
+        supportsAdvertisingTimeout: supported && android,
+        maximumAdvertisingDataLength: supported ? 31 : null,
+      );
+    }
+  }
+
+  @override
+  Future<void> startExtendedAdvertising({
+    required List<String> services,
+    ManufacturerData? manufacturerData,
+    PeripheralPlatformConfig? platformConfig,
+  }) async {
+    await _ensureBluetoothAdvertisePermission();
+    await _channel.startExtendedAdvertising(
+      services.map((e) => BleUuidParser.string(e)).toList(),
+      manufacturerData?.toUniversalManufacturerData(),
+      platformConfig,
     );
   }
+
+  @override
+  Future<void> stopExtendedAdvertising() => _channel.stopExtendedAdvertising();
 
   @override
   Future<void> addService(

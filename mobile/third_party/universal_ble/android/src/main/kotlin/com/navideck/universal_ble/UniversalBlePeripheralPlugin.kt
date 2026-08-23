@@ -18,8 +18,12 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Handler
 import android.os.ParcelUuid
+import android.bluetooth.le.AdvertisingSet
+import android.bluetooth.le.AdvertisingSetCallback
+import android.bluetooth.le.AdvertisingSetParameters
 import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import java.util.ArrayDeque
@@ -38,6 +42,11 @@ class UniversalBlePeripheralPlugin(
     private val callback = UniversalBlePeripheralCallback(messenger)
     private val handler = Handler(applicationContext.mainLooper)
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
+    private var extendedAdvertisingSet: AdvertisingSet? = null
+    private var effectiveLegacyTxPowerLevel: Int? = null
+    private var effectiveExtendedTxPowerLevel: Int? = null
+    private var advertisingTier: String = "legacy_1m"
+    private var extendedStartResult: ((Result<Unit>) -> Unit)? = null
     private var gattServer: BluetoothGattServer? = null
     private val bluetoothDevicesMap: MutableMap<String, BluetoothDevice> = HashMap()
     private val knownBluetoothDevicesMap: MutableMap<String, BluetoothDevice> = HashMap()
@@ -55,6 +64,8 @@ class UniversalBlePeripheralPlugin(
 
     fun dispose() {
         kotlin.runCatching { bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) }
+        kotlin.runCatching { bluetoothLeAdvertiser?.stopAdvertisingSet(extendedAdvertiseCallback) }
+        extendedAdvertisingSet = null
         restoreAdapterNameIfNeeded()
         gattServer?.close()
         gattServer = null
@@ -94,9 +105,55 @@ class UniversalBlePeripheralPlugin(
 
     override fun getReadinessState(): PeripheralReadinessState {
         val adapter = bluetoothManager.adapter ?: return PeripheralReadinessState.UNSUPPORTED
-        if (!adapter.isMultipleAdvertisementSupported) return PeripheralReadinessState.UNSUPPORTED
         if (!adapter.isEnabled) return PeripheralReadinessState.BLUETOOTH_OFF
+        if (adapter.bluetoothLeAdvertiser == null) return PeripheralReadinessState.UNSUPPORTED
         return PeripheralReadinessState.READY
+    }
+
+    /**
+     * Append-only capability tuple consumed by the Dart binding:
+     * peripheral, manufacturer-ad, manufacturer-scan-response,
+     * service-ad, service-scan-response, targeted-update, timeout,
+     * extended, coded-PHY, 2M-PHY, multiple-advertiser, max-data-length,
+     * legacy effective TX, extended effective TX, extended active, tier.
+     */
+    override fun getCapabilities(): List<Any?> {
+        val adapter = bluetoothManager.adapter
+            ?: return listOf(false, false, false, false, false, false, false,
+                false, false, false, false, null, effectiveLegacyTxPowerLevel,
+                effectiveExtendedTxPowerLevel, extendedAdvertisingSet != null,
+                advertisingTier)
+        val enabled = adapter.isEnabled
+        val advertiser = adapter.bluetoothLeAdvertiser != null
+        val extended = enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            adapter.isLeExtendedAdvertisingSupported
+        val coded = enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            adapter.isLeCodedPhySupported
+        val phy2m = enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            adapter.isLe2MPhySupported
+        val maxLength = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            adapter.leMaximumAdvertisingDataLength.toLong()
+        } else {
+            31L
+        }
+        return listOf(
+            enabled && advertiser,
+            enabled && advertiser,
+            enabled && advertiser,
+            false,
+            false,
+            enabled && gattServer != null,
+            enabled && advertiser,
+            extended,
+            coded,
+            phy2m,
+            enabled && adapter.isMultipleAdvertisementSupported,
+            maxLength,
+            effectiveLegacyTxPowerLevel,
+            effectiveExtendedTxPowerLevel,
+            extendedAdvertisingSet != null,
+            advertisingTier,
+        )
     }
 
     override fun addService(service: PeripheralService) {
@@ -163,8 +220,10 @@ class UniversalBlePeripheralPlugin(
                 val addManufacturerDataInScanResponse =
                     platformConfig?.android?.addManufacturerDataInScanResponse == true
 
+                val includeTxPowerLevel =
+                    platformConfig?.android?.includeTxPowerLevel == true
                 val advertiseDataBuilder = AdvertiseData.Builder()
-                    .setIncludeTxPowerLevel(false)
+                    .setIncludeTxPowerLevel(includeTxPowerLevel)
                     .setIncludeDeviceName(localName != null)
                 val scanResponseBuilder = AdvertiseData.Builder()
                     .setIncludeTxPowerLevel(false)
@@ -204,6 +263,81 @@ class UniversalBlePeripheralPlugin(
         }
     }
 
+    override fun startExtendedAdvertising(
+        services: List<String>,
+        manufacturerData: UniversalManufacturerData?,
+        platformConfig: PeripheralPlatformConfig?,
+        callback: (Result<Unit>) -> Unit,
+    ) {
+        try {
+            ensurePeripheralInitialized()
+        } catch (error: Exception) {
+            callback(Result.failure(error))
+            return
+        }
+        val adapter = bluetoothManager.adapter
+        if (adapter == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            !adapter.isLeExtendedAdvertisingSupported ||
+            !adapter.isLeCodedPhySupported ||
+            !adapter.isMultipleAdvertisementSupported
+        ) {
+            callback(Result.failure(UnsupportedOperationException(
+                "Extended Coded-PHY advertising is not supported by this adapter",
+            )))
+            return
+        }
+        handler.post {
+            try {
+                bluetoothLeAdvertiser?.stopAdvertisingSet(extendedAdvertiseCallback)
+                extendedAdvertisingSet = null
+                extendedStartResult = callback
+                val includeTxPower = platformConfig?.android?.includeTxPowerLevel == true
+                val dataBuilder = AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .setIncludeTxPowerLevel(includeTxPower)
+                manufacturerData?.let {
+                    dataBuilder.addManufacturerData(it.companyIdentifier.toInt(), it.data)
+                }
+                services.forEach {
+                    dataBuilder.addServiceUuid(ParcelUuid.fromString(it))
+                }
+                val parameters = AdvertisingSetParameters.Builder()
+                    .setLegacyMode(false)
+                    .setConnectable(false)
+                    .setScannable(false)
+                    .setPrimaryPhy(BluetoothDevice.PHY_LE_1M)
+                    .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+                    .setInterval(AdvertisingSetParameters.INTERVAL_LOW)
+                    .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_MAX)
+                    .build()
+                bluetoothLeAdvertiser?.startAdvertisingSet(
+                    parameters,
+                    dataBuilder.build(),
+                    null,
+                    null,
+                    null,
+                    extendedAdvertiseCallback,
+                ) ?: throw UnsupportedOperationException("Bluetooth LE advertiser unavailable")
+            } catch (error: Exception) {
+                extendedStartResult = null
+                Log.w(TAG, "startAdvertisingSet failed", error)
+                callback(Result.failure(error))
+            }
+        }
+    }
+
+    override fun stopExtendedAdvertising() {
+        handler.post {
+            kotlin.runCatching {
+                bluetoothLeAdvertiser?.stopAdvertisingSet(extendedAdvertiseCallback)
+            }
+            extendedAdvertisingSet = null
+            extendedStartResult = null
+            effectiveExtendedTxPowerLevel = null
+            advertisingTier = "legacy_1m"
+        }
+    }
+
     override fun stopAdvertising() {
         if (advertisingState == PeripheralAdvertisingState.IDLE && bluetoothLeAdvertiser == null) {
             return
@@ -212,6 +346,11 @@ class UniversalBlePeripheralPlugin(
         callback.onAdvertisingStateChange(PeripheralAdvertisingState.STOPPING, null) {}
         handler.post {
             kotlin.runCatching { bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) }
+            kotlin.runCatching { bluetoothLeAdvertiser?.stopAdvertisingSet(extendedAdvertiseCallback) }
+            extendedAdvertisingSet = null
+            extendedStartResult = null
+            effectiveExtendedTxPowerLevel = null
+            advertisingTier = "legacy_1m"
             restoreAdapterNameIfNeeded()
             advertisingState = PeripheralAdvertisingState.IDLE
             callback.onAdvertisingStateChange(PeripheralAdvertisingState.IDLE, null) {}
@@ -422,9 +561,51 @@ class UniversalBlePeripheralPlugin(
 
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             super.onStartSuccess(settingsInEffect)
+            effectiveLegacyTxPowerLevel = settingsInEffect?.txPowerLevel
+            advertisingTier = "legacy_1m"
             advertisingState = PeripheralAdvertisingState.ADVERTISING
             handler.post {
                 callback.onAdvertisingStateChange(PeripheralAdvertisingState.ADVERTISING, null) {}
+            }
+        }
+    }
+
+    private val extendedAdvertiseCallback = object : AdvertisingSetCallback() {
+        override fun onAdvertisingSetStarted(
+            advertisingSet: AdvertisingSet?,
+            txPower: Int,
+            status: Int,
+        ) {
+            super.onAdvertisingSetStarted(advertisingSet, txPower, status)
+            handler.post {
+                if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS && advertisingSet != null) {
+                    extendedAdvertisingSet = advertisingSet
+                    effectiveExtendedTxPowerLevel = txPower
+                    advertisingTier = "legacy_1m+coded_extended"
+                    val result = extendedStartResult
+                    extendedStartResult = null
+                    result?.invoke(Result.success(Unit))
+                } else {
+                    extendedAdvertisingSet = null
+                    val errorMessage = when (status) {
+                        AdvertisingSetCallback.ADVERTISE_FAILED_ALREADY_STARTED -> "Already started"
+                        AdvertisingSetCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> "Data too large"
+                        AdvertisingSetCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
+                        AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
+                        AdvertisingSetCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
+                        else -> "Failed to start extended advertising: $status"
+                    }
+                    val result = extendedStartResult
+                    extendedStartResult = null
+                    result?.invoke(Result.failure(Exception(errorMessage)))
+                }
+            }
+        }
+
+        override fun onAdvertisingDataSet(advertisingSet: AdvertisingSet?, status: Int) {
+            super.onAdvertisingDataSet(advertisingSet, status)
+            if (status != AdvertisingSetCallback.ADVERTISE_SUCCESS) {
+                Log.w(TAG, "extended advertising data update failed: $status")
             }
         }
     }

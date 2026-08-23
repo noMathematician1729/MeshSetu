@@ -29,6 +29,7 @@ class MeshPeerSnapshot {
     required this.peerId,
     required this.connected,
     required this.rssi,
+    this.txPowerAtOneMeter,
     required this.lastSeenMs,
   });
 
@@ -38,6 +39,10 @@ class MeshPeerSnapshot {
   /// Raw BLE RSSI in dBm, or null if the platform did not report one for
   /// this peer (e.g. server-side sessions before a scan result arrives).
   final int? rssi;
+
+  /// Advertised TX power calibration at one meter, when the peer included it.
+  /// Null preserves the conservative historical -59 dBm default.
+  final int? txPowerAtOneMeter;
   final int lastSeenMs;
 
   /// Rough distance estimate in meters from [rssi], using the standard
@@ -51,7 +56,7 @@ class MeshPeerSnapshot {
   double? get estimatedDistanceMeters {
     final value = rssi;
     if (value == null) return null;
-    const txPowerAtOneMeter = -59;
+    final txPowerAtOneMeter = this.txPowerAtOneMeter ?? -59;
     const pathLossExponent = 2.5;
     return math
         .pow(10, (txPowerAtOneMeter - value) / (10 * pathLossExponent))
@@ -498,6 +503,7 @@ class MeshBridgeClient {
               peerId: '${peer['peerId'] ?? ''}',
               connected: peer['connected'] == null || peer['connected'] == true,
               rssi: (peer['rssi'] as num?)?.toInt(),
+              txPowerAtOneMeter: (peer['txPowerAtOneMeter'] as num?)?.toInt(),
               lastSeenMs: (peer['lastSeenMs'] as num?)?.toInt() ?? 0,
             ),
         ]..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));

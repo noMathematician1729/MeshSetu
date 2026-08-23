@@ -63,6 +63,19 @@ abstract class UniversalBlePeripheralPlatform {
 
   Future<void> stopAdvertising();
 
+  /// Starts an optional non-connectable extended advertising set. The default
+  /// implementation keeps older/custom platforms compatible and reports the
+  /// feature as unavailable.
+  Future<void> startExtendedAdvertising({
+    required List<String> services,
+    ManufacturerData? manufacturerData,
+    PeripheralPlatformConfig? platformConfig,
+  }) async {
+    throw UnsupportedError('Extended BLE advertising is not supported');
+  }
+
+  Future<void> stopExtendedAdvertising() async {}
+
   Future<void> updateCharacteristicValue({
     required String characteristicId,
     required Uint8List value,
@@ -170,6 +183,7 @@ class UniversalBlePeripheralUnsupported extends UniversalBlePeripheralPlatform {
       supportsServiceDataInScanResponse: false,
       supportsTargetedCharacteristicUpdate: false,
       supportsAdvertisingTimeout: false,
+      maximumAdvertisingDataLength: 31,
     );
   }
 
@@ -198,6 +212,18 @@ class UniversalBlePeripheralUnsupported extends UniversalBlePeripheralPlatform {
   Future<void> stopAdvertising() async {
     throw _notSupported();
   }
+
+  @override
+  Future<void> startExtendedAdvertising({
+    required List<String> services,
+    ManufacturerData? manufacturerData,
+    PeripheralPlatformConfig? platformConfig,
+  }) async {
+    throw _notSupported();
+  }
+
+  @override
+  Future<void> stopExtendedAdvertising() async {}
 
   @override
   Future<void> updateCharacteristicValue({

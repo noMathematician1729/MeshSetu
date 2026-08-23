@@ -141,6 +141,7 @@ class PeerState {
     required this.connected,
     required this.mtu,
     required this.rssi,
+    this.txPowerAtOneMeter,
     required this.queuedObjects,
     required this.lastSeenMs,
   });
@@ -150,6 +151,7 @@ class PeerState {
   final bool connected;
   final int mtu;
   final int? rssi;
+  final int? txPowerAtOneMeter;
   final int queuedObjects;
   final int lastSeenMs;
 }

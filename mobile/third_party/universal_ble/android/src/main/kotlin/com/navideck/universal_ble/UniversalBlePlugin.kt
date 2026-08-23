@@ -1423,8 +1423,10 @@ class UniversalBlePlugin : UniversalBlePlatformChannel, BluetoothGattCallback(),
                         serviceData = serviceData,
                         rssi = result.rssi.toLong(),
                         services = serviceUuids.map { it.toString() }.toList(),
-                        timestamp = System.currentTimeMillis()
-                    )
+                        timestamp = System.currentTimeMillis(),
+                        txPower = result.scanRecord?.txPowerLevel?.takeIf {
+                            it != Int.MIN_VALUE
+                        }?.toLong(),                    )
                 ) {}
             }
         }

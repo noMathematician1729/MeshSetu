@@ -9,6 +9,7 @@ class BleDevice {
   int? rssi;
   bool? paired;
   int? timestamp;
+  int? txPower;
 
   /// List of services advertised by the device.
   List<String> services;
@@ -55,9 +56,10 @@ class BleDevice {
     this.manufacturerDataList = const [],
     Map<String, Uint8List> serviceData = const {},
     this.timestamp,
-  })  : serviceData = _validateServiceData(serviceData),
-        rawName = name,
-        name = name?.replaceAll(RegExp(r'[^ -~]'), '').trim();
+    this.txPower,
+  }) : serviceData = _validateServiceData(serviceData),
+       rawName = name,
+       name = name?.replaceAll(RegExp(r'[^ -~]'), '').trim();
 
   DateTime? get timestampDateTime => timestamp != null
       ? DateTime.fromMillisecondsSinceEpoch(timestamp!)
