@@ -699,13 +699,20 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   }
 
   /// This relay device's own position, reported as the "relayer location".
-  /// Best-effort: the alert must still carry medical details when location
-  /// permission is denied or a fix is unavailable.
+  ///
+  /// Deliberately never calls `Permission.request()`. BLE scanning in this app
+  /// depends on `Permission.locationWhenInUse` (see `core/ble/ble_permissions
+  /// .dart`: scan results infer physical proximity, so `neverForLocation` is
+  /// not usable). Requesting it from the relay path could therefore break
+  /// discovery in two ways: a user tapping "Don't allow" revokes the very
+  /// grant scanning needs, and a dialog raised while Event Mode is running its
+  /// own permission flow races that flow. Location is used only when it has
+  /// already been granted; otherwise the alert still goes out with medical
+  /// details and no coordinates.
   Future<SosLocation?> _captureRelayLocation() async {
     try {
       if (!ref.read(locationSharingProvider)) return null;
-      final permission = await Permission.locationWhenInUse.request();
-      if (!permission.isGranted) return null;
+      if (!await Permission.locationWhenInUse.isGranted) return null;
       return (await const LocationCapture().capture()).location;
     } catch (_) {
       return null;
