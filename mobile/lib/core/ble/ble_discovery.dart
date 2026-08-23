@@ -269,10 +269,10 @@ abstract final class MeshScanner {
           );
           if (sosPayload != null) {
             final alert = MeshSosAdvertisement.decode(sosPayload);
-            if (alert != null &&
-                (expectedFingerprint == null ||
-                    alert.siteFingerprint ==
-                        (expectedFingerprint & 0xffffffff))) {
+            // Forwarded regardless of site fingerprint: an emergency
+            // broadcast from a neighbouring event namespace is still an
+            // emergency, and the previous filter swallowed it silently.
+            if (alert != null) {
               onSosAlert?.call(alert, device.deviceId);
             }
             continue;
@@ -308,10 +308,14 @@ abstract final class MeshScanner {
             malformedMetadata.add(device.deviceId);
             continue;
           }
+          // Site fingerprint is recorded for diagnostics only. It is no longer
+          // a discovery gate: two handsets provisioned into different local
+          // event namespaces still advertise a decodable MeshSetu discovery
+          // record, and dropping them here made phones sitting next to each
+          // other report "0 nearby" with no actionable reason.
           if (expectedFingerprint != null &&
               metadata.fingerprint != expectedFingerprint) {
             fingerprintMismatches.add(device.deviceId);
-            continue;
           }
           found[device.deviceId] = DiscoveredPeer(
             device: device,

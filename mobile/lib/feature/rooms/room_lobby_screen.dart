@@ -59,6 +59,14 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
         .listen((members) {
           if (mounted) setState(() => _meshMembers = members);
         });
+    // Presence announcements below are written to the durable outbox, so the
+    // outbox must be bound to this site before they can leave the device.
+    unawaited(
+      RoomMeshBootstrap.attachForSite(
+        ref: ref,
+        siteId: widget.manifest.siteId,
+      ),
+    );
     unawaited(_connectLivePresence());
     unawaited(_announcePresence());
     _reannounceTimer = Timer.periodic(
