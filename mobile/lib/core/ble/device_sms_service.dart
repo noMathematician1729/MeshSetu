@@ -50,6 +50,58 @@ abstract final class DeviceSmsService {
     return body.length <= 160 ? body : body.substring(0, 160);
   }
 
+  /// Builds the detailed alert sent to a *victim's* emergency contacts once a
+  /// relay device with internet has resolved who they are.
+  ///
+  /// The compact BLE advertisement is 20 bytes: it carries a reporter UID, a
+  /// sequence and flags — no name, no medical record, no coordinates. Every
+  /// identifying field here therefore comes from the control-room profile
+  /// lookup, and the position is *this relay device's* GPS, labelled as such
+  /// because it says where the alert was heard, not where the victim is.
+  ///
+  /// Deliberately multi-segment, unlike [buildBody]: a contact needs the
+  /// medical details and a map link more than the message needs to fit one
+  /// GSM-7 segment. Android splits it with `divideMessage`, so nothing is
+  /// truncated here.
+  static String buildRelayAlertBody({
+    required String victimName,
+    String? victimPhone,
+    String? bloodGroup,
+    String? allergies,
+    String? conditions,
+    double? relayLatitude,
+    double? relayLongitude,
+    String? reporterUid,
+    int? sequence,
+    DateTime? at,
+  }) {
+    final hasLocation = relayLatitude != null && relayLongitude != null;
+    final lines = <String>[
+      'EMERGENCY SOS — CEAL',
+      'Victim: ${_valueOr(victimName, 'Unknown')}',
+      'Phone: ${_valueOr(victimPhone, 'Unknown')}',
+      'Blood group: ${_valueOr(bloodGroup, 'Unknown')}',
+      'Allergies: ${_valueOr(allergies, 'none')}',
+      'Conditions: ${_valueOr(conditions, 'none')}',
+      if (hasLocation)
+        'Relayer location: ${relayLatitude.toStringAsFixed(5)}, '
+            '${relayLongitude.toStringAsFixed(5)}'
+      else
+        'Relayer location: unavailable',
+      if (hasLocation)
+        'https://maps.google.com/?q=$relayLatitude,$relayLongitude',
+      'Time: ${(at ?? DateTime.now()).toUtc().toIso8601String()}',
+      if (reporterUid != null && reporterUid.trim().isNotEmpty)
+        'ID: uid:${reporterUid.trim()}:${sequence ?? 0}',
+    ];
+    return lines.join('\n');
+  }
+
+  static String _valueOr(String? value, String fallback) {
+    final trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? fallback : trimmed;
+  }
+
   /// Sends [message] to each phone number in [phones] using the device SIM.
   ///
   /// Returns the count of numbers that were accepted by the platform.
