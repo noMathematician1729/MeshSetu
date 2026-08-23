@@ -50,6 +50,12 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     // Report this room as active immediately — any notifications for it
     // that arrive while the screen is mounted and foregrounded are suppressed.
     _activeRoomReporter.reportActive();
+    // Bind the durable mesh outbox to this room's site up front. The live
+    // socket below is only the online path; without this the offline path has
+    // no sender attached and messages never leave `outboxEvents`.
+    unawaited(
+      RoomMeshBootstrap.attachForSite(ref: ref, siteId: widget.siteId),
+    );
     unawaited(_connectLiveTransport());
     unawaited(_announcePresence());
   }
