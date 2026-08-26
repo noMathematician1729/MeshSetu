@@ -49,12 +49,8 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    # Only the four files SherpaOnnxEnglishSttEngine._requiredFiles loads are
-    # bundled. Declaring the directory would ship unused model variants.
-    - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/encoder-epoch-99-avg-1.int8.onnx
-    - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/decoder-epoch-99-avg-1.onnx
-    - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/joiner-epoch-99-avg-1.int8.onnx
-    - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/tokens.txt
+    # Every STT model downloads to private app storage after the language is
+    # selected during onboarding; no voice model is bundled in the APK.
     - assets/icon/logo.png
   fonts:
     - family: Inter

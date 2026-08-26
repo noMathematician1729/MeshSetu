@@ -133,7 +133,7 @@ class EmergencyHomeScreen extends StatelessWidget {
                         title: 'Voice input',
                         subtitle: description.isEmpty
                             ? 'Speak details'
-                            : 'Details ready',
+                            : 'Tap to record again',
                         selected: description.isNotEmpty,
                         onTap: onVoice,
                       ),
