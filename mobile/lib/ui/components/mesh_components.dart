@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../localization/mesh_localizations.dart';
 import '../theme/mesh_theme.dart';
 import '../theme/mesh_tokens.dart';
 
@@ -44,7 +45,10 @@ class MeshPage extends StatelessWidget {
     return Scaffold(
       appBar: title == null
           ? null
-          : AppBar(title: Text(title!), actions: actions),
+          : AppBar(
+              title: Text(context.meshL10n.text(title!)),
+              actions: actions,
+            ),
       body: body,
     );
   }
@@ -97,11 +101,14 @@ class MeshScaffold extends StatelessWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(title, style: textTheme.displaySmall),
+                              Text(
+                                context.meshL10n.text(title),
+                                style: textTheme.displaySmall,
+                              ),
                               if (subtitle != null) ...[
                                 const SizedBox(height: MeshSpace.xs),
                                 Text(
-                                  subtitle!,
+                                  context.meshL10n.text(subtitle!),
                                   style: textTheme.bodyMedium,
                                 ),
                               ],
@@ -138,10 +145,16 @@ class MeshSectionTitle extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title, style: Theme.of(context).textTheme.titleLarge),
+        Text(
+          context.meshL10n.text(title),
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
         if (subtitle != null) ...[
           const SizedBox(height: MeshSpace.xs),
-          Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            context.meshL10n.text(subtitle!),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
         ],
       ],
     ),
@@ -161,7 +174,7 @@ class MeshMicroLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = MeshPalette.of(context);
     return Text(
-      label.toUpperCase(),
+      context.meshL10n.text(label).toUpperCase(),
       style: Theme.of(context).textTheme.labelMedium?.copyWith(
         color: color ?? palette.textMuted,
         letterSpacing: 1.1,
@@ -232,15 +245,21 @@ class MeshStatusPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = MeshPalette.of(context);
     final (foreground, background) = switch (tone) {
-      MeshStatusTone.active => (palette.live, palette.live.withValues(alpha: 0.14)),
-      MeshStatusTone.critical => (palette.ember, palette.ember.withValues(alpha: 0.14)),
+      MeshStatusTone.active => (
+        palette.live,
+        palette.live.withValues(alpha: 0.14),
+      ),
+      MeshStatusTone.critical => (
+        palette.ember,
+        palette.ember.withValues(alpha: 0.14),
+      ),
       MeshStatusTone.neutral => (
         Theme.of(context).colorScheme.onSurfaceVariant,
         Theme.of(context).colorScheme.surfaceContainerHighest,
       ),
     };
     return Semantics(
-      label: label,
+      label: context.meshL10n.text(label),
       child: Container(
         padding: const EdgeInsets.symmetric(
           horizontal: 10,
@@ -261,7 +280,7 @@ class MeshStatusPill extends StatelessWidget {
             const SizedBox(width: 6),
             Flexible(
               child: Text(
-                label,
+                context.meshL10n.text(label),
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
                   color: foreground,
@@ -308,7 +327,11 @@ class MeshStatRail extends StatelessWidget {
         children: [
           for (var i = 0; i < items.length; i++) ...[
             if (i > 0) const SizedBox(width: MeshSpace.sm),
-            _MeshStatRailCell(item: items[i], palette: palette, numeric: numeric),
+            _MeshStatRailCell(
+              item: items[i],
+              palette: palette,
+              numeric: numeric,
+            ),
           ],
         ],
       ),
@@ -403,7 +426,10 @@ class MeshDataRow extends StatelessWidget {
             const SizedBox(width: MeshSpace.sm),
           ],
           Expanded(
-            child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+            child: Text(
+              context.meshL10n.text(label),
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
           ),
           const SizedBox(width: MeshSpace.sm),
           Text(
@@ -544,11 +570,7 @@ class _SignalLatticePainter extends CustomPainter {
         if (alpha > 0.005) {
           paint.color = color.withValues(alpha: alpha);
           paint.strokeWidth = 1.4;
-          canvas.drawLine(
-            Offset(x - 5, y),
-            Offset(x + 5, y),
-            paint,
-          );
+          canvas.drawLine(Offset(x - 5, y), Offset(x + 5, y), paint);
         }
         col++;
       }
@@ -596,13 +618,13 @@ class MeshActionTile extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      title,
+                      context.meshL10n.text(title),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     Text(
-                      subtitle,
+                      context.meshL10n.text(subtitle),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall,
@@ -618,13 +640,13 @@ class MeshActionTile extends StatelessWidget {
               Icon(icon, color: iconColor),
               const SizedBox(height: MeshSpace.sm),
               Text(
-                title,
+                context.meshL10n.text(title),
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: MeshSpace.xs),
               Text(
-                subtitle,
+                context.meshL10n.text(subtitle),
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -682,7 +704,7 @@ class MeshFullWidthButton extends StatelessWidget {
                 Icon(icon, size: 20),
                 const SizedBox(width: MeshSpace.sm),
               ],
-              Flexible(child: Text(label)),
+              Flexible(child: Text(context.meshL10n.text(label))),
             ],
           );
     final style = matte
@@ -737,13 +759,13 @@ class MeshEmptyState extends StatelessWidget {
           ),
           const SizedBox(height: MeshSpace.md),
           Text(
-            title,
+            context.meshL10n.text(title),
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleLarge,
           ),
           const SizedBox(height: MeshSpace.sm),
           Text(
-            message,
+            context.meshL10n.text(message),
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium,
           ),

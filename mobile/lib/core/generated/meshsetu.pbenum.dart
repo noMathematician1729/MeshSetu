@@ -59,6 +59,12 @@ class PayloadType extends $pb.ProtobufEnum {
   static const PayloadType BEACON_OBSERVATION =
       PayloadType._(7, _omitEnumNames ? '' : 'BEACON_OBSERVATION');
 
+  /// Push-to-talk voice note authored inside a Room. Distinct from
+  /// VOICE_OBJECT, which is SOS evidence and is forwarded to the control
+  /// room; room voice stays inside the room's membership.
+  static const PayloadType ROOM_VOICE =
+      PayloadType._(8, _omitEnumNames ? '' : 'ROOM_VOICE');
+
   static const $core.List<PayloadType> values = <PayloadType>[
     PT_UNSPECIFIED,
     STRUCTURED_SOS,
@@ -68,10 +74,11 @@ class PayloadType extends $pb.ProtobufEnum {
     ACK,
     RESPONDER_UPDATE,
     BEACON_OBSERVATION,
+    ROOM_VOICE,
   ];
 
   static final $core.List<PayloadType?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
   static PayloadType? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

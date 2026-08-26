@@ -32,10 +32,17 @@ class MeshPeerSnapshot {
     required this.connected,
     required this.rssi,
     required this.lastSeenMs,
+    this.mtu = 0,
   });
 
   final String peerId;
   final bool connected;
+
+  /// Negotiated ATT MTU for this peer's GATT link, or 0 when the foreground
+  /// task has not reported one yet. This is the byte budget room voice checks
+  /// against before recording (see `feature/rooms/room_voice_capacity.dart`);
+  /// the task has always sent it, it just was not surfaced here before.
+  final int mtu;
 
   /// Raw BLE RSSI in dBm, or null if the platform did not report one for
   /// this peer (e.g. server-side sessions before a scan result arrives).
@@ -560,6 +567,7 @@ class MeshBridgeClient {
             MeshPeerSnapshot(
               peerId: '${peer['peerId'] ?? ''}',
               connected: peer['connected'] == null || peer['connected'] == true,
+              mtu: (peer['mtu'] as num?)?.toInt() ?? 0,
               rssi: (peer['rssi'] as num?)?.toInt(),
               lastSeenMs: (peer['lastSeenMs'] as num?)?.toInt() ?? 0,
             ),
@@ -902,6 +910,17 @@ class MeshBridgeClient {
   }
 
   Future<void> _storeReceived(ReceivedObject received) async {
+    // An object this device originated comes back to it over the mesh: a peer
+    // store-and-forwards it onward, and the relay's durable inbox replays every
+    // authenticated envelope it holds — including our own. Persisting that copy
+    // showed the author their own room message a second time as an incoming
+    // one. The origin id is inside the authenticated envelope, so a foreign
+    // object cannot forge its way past this check.
+    final localEphemeralId = _localEphemeralId;
+    if (localEphemeralId != null &&
+        received.envelope.originEphemeralId == localEphemeralId) {
+      return;
+    }
     final objectId = received.envelope.objectId;
     if (_storedObjectIds.add(objectId)) {
       try {

@@ -150,7 +150,16 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Admin delivery pending'), findsOneWidget);
+      // The row was inserted as 'acked', so `_deliveryPanel` must render the
+      // mesh-custody label. Pump in bounded steps rather than
+      // `pumpAndSettle()`: the radar sweep runs a repeating
+      // AnimationController that would never settle, while the Drift watch
+      // query needs a few event-loop turns to deliver its first row.
+      final acknowledged = find.text('Acknowledged by the mesh');
+      for (var i = 0; i < 20 && acknowledged.evaluate().isEmpty; i++) {
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+      expect(acknowledged, findsOneWidget);
       // The radar sweep runs a repeating AnimationController, and Drift
       // schedules a zero-duration internal timer when the delivery
       // StreamBuilder's query stream is cancelled — settle both before the
@@ -200,9 +209,27 @@ void main() {
           ),
         );
         await tester.pump();
-        expect(find.text('Mesh active · waiting for a peer'), findsOneWidget);
-        expect(find.textContaining('No connected mesh peers'), findsOneWidget);
+        // Event mode is now running with zero peers: the screen must stop
+        // blaming a blocked radio and say it is waiting for a peer instead,
+        // while still never claiming delivery.
+        expect(find.text('SOS saved · mesh relay pending'), findsOneWidget);
+        expect(
+          find.text(
+            'Mesh is running; waiting for a nearby peer to accept the packet',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Turn on Location in Settings.'), findsNothing);
         expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+
+        // `mesh` is a single-subscription controller and the StreamBuilder is
+        // still listening. `addTearDown(mesh.close)` would then wait forever
+        // for its done event to be delivered — tearDown runs outside the pump
+        // loop, so nothing ever dispatches it and the test hangs until the
+        // 10-minute framework timeout. Unmount first, exactly as the
+        // 'renders a delivery panel' test above does.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 1));
       },
     );
 

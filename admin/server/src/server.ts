@@ -117,18 +117,17 @@ function bearer(
     res.status(401).json({ error: "invalid token" });
   }
 }
-function gateway(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction,
-) {
-  if (
-    req.header("x-meshsetu-gateway-key") !== gatewaySecret() &&
-    req.header("x-meshsetu-demo-key") !== gatewaySecret()
-  )
-    return res.status(401).json({ error: "bad gateway key" });
-  next();
-}
+const roomJoinSchema = z.object({ type: z.literal('join-room'), siteId: z.string().min(1).max(100), roomId: z.string().min(1).max(100), memberId: z.string().min(1).max(200), displayName: z.string().min(1).max(100), gatewayKey: z.string().min(1) })
+const roomMessageSchema = z.object({ type: z.literal('room-message'), messageId: z.string().min(1).max(200), text: z.string().trim().min(1).max(2000), sentAtMs: z.number().int().positive() })
+// A push-to-talk voice note relayed between room members. `audio` is base64
+// Opus produced by the app's RoomVoiceRecorder: an 8-second clip at 12 kbps is
+// about 12 KB of audio, so 64 KB of base64 is a generous ceiling that still
+// refuses anything the BLE fallback path could never carry. The server only
+// fans the payload out — it is never decoded, stored, or forwarded to the
+// dashboard, because room voice is room traffic, not SOS evidence.
+const roomVoiceSchema = z.object({ type: z.literal('room-voice'), messageId: z.string().min(1).max(200), audio: z.string().min(1).max(65536).regex(/^[A-Za-z0-9+/]+={0,2}$/), durationMs: z.number().int().positive().max(8000), sentAtMs: z.number().int().positive() })
+function bearer(req: express.Request, res: express.Response, next: express.NextFunction) { const token = req.headers.authorization?.replace(/^Bearer\s+/i, ''); if (!token) return res.status(401).json({ error: 'authentication required' }); try { (req as any).operator = jwt.verify(token, jwtSecret()); next() } catch { res.status(401).json({ error: 'invalid token' }) } }
+function gateway(req: express.Request, res: express.Response, next: express.NextFunction) { if (req.header('x-meshsetu-gateway-key') !== gatewaySecret() && req.header('x-meshsetu-demo-key') !== gatewaySecret()) return res.status(401).json({ error: 'bad gateway key' }); next() }
 
 const publicAppOrigin = () =>
   normalizeOrigin(
@@ -1321,24 +1320,27 @@ wss.on("connection", (socket, request) => {
         emitRoomMembers(key);
         return;
       }
-      const message = roomMessageSchema.safeParse(payload);
-      const connection = roomConnections.get(socket);
-      const member =
-        connection == null
-          ? undefined
-          : roomMembers.get(connection.roomKey)?.get(connection.memberId);
-      if (!message.success || connection == null || member == null) return;
-      const outbound = JSON.stringify({
-        type: "room-message",
-        data: {
-          messageId: message.data.messageId,
-          text: message.data.text,
-          memberId: member.memberId,
-          displayName: member.displayName,
-          sentAtMs: message.data.sentAtMs,
-        },
-      });
-      let recipients = 0;
+      const connection = roomConnections.get(socket)
+      const member = connection == null ? undefined : roomMembers.get(connection.roomKey)?.get(connection.memberId)
+      if (connection == null || member == null) return
+      const voice = roomVoiceSchema.safeParse(payload)
+      if (voice.success) {
+        const outboundVoice = JSON.stringify({ type: 'room-voice', data: { messageId: voice.data.messageId, audio: voice.data.audio, durationMs: voice.data.durationMs, memberId: member.memberId, displayName: member.displayName, sentAtMs: voice.data.sentAtMs } })
+        let voiceRecipients = 0
+        for (const [client, clientConnection] of roomConnections) {
+          if (client === socket) continue
+          if (clientConnection.roomKey === connection.roomKey && client.readyState === 1) { client.send(outboundVoice); voiceRecipients++ }
+        }
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: 'room-voice-accepted', data: { messageId: voice.data.messageId, recipientCount: voiceRecipients } }))
+        }
+        console.log(`[room-chat] ${member.displayName}: voice note (${voice.data.durationMs}ms) broadcast to ${voiceRecipients} connection(s)`)
+        return
+      }
+      const message = roomMessageSchema.safeParse(payload)
+      if (!message.success) return
+      const outbound = JSON.stringify({ type: 'room-message', data: { messageId: message.data.messageId, text: message.data.text, memberId: member.memberId, displayName: member.displayName, sentAtMs: message.data.sentAtMs } })
+      let recipients = 0
       for (const [client, clientConnection] of roomConnections) {
         if (client === socket) continue;
         if (

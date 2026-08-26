@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/data/database.dart';
@@ -11,6 +13,7 @@ import '../feature/rooms/room_policy.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/stt/sherpa_onnx_stt_engine.dart';
 import '../feature/stt/stt_engine.dart';
+import '../feature/stt/stt_model_manager.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge_client.dart';
 
@@ -65,7 +68,19 @@ final onboardingRepositoryProvider = Provider<OnboardingRepository>((ref) {
 });
 
 final onboardingProfileProvider = FutureProvider<OnboardingProfile?>((ref) {
-  return ref.watch(onboardingRepositoryProvider).load();
+  return ref.watch(onboardingRepositoryProvider).load().then((profile) {
+    final language = SttLanguage.fromDisplayName(profile?.language ?? '');
+    if (language != null) {
+      unawaited(() async {
+        try {
+          await ref.read(sttModelManagerProvider).download(language);
+        } catch (_) {
+          // Onboarding and voice input surface the retryable model state.
+        }
+      }());
+    }
+    return profile;
+  });
 });
 
 final sosRepositoryProvider = Provider<SosRepository>(
@@ -75,10 +90,18 @@ final sosRepositoryProvider = Provider<SosRepository>(
   ),
 );
 
-/// Real offline STT binding. A failed model load is reported to the SOS flow;
-/// emergency packets never contain fabricated transcript text.
+final sttModelManagerProvider = Provider<SttModelManager>((ref) {
+  final manager = SttModelManager();
+  ref.onDispose(manager.dispose);
+  return manager;
+});
+
+/// Real offline STT binding. Every selected language model is downloaded to
+/// private app storage before it can be used for voice input.
 final offlineSttEngineProvider = Provider<OfflineSttEngine>(
-  (ref) => SherpaOnnxEnglishSttEngine(),
+  (ref) => SherpaOnnxMultilingualSttEngine(
+    modelManager: ref.watch(sttModelManagerProvider),
+  ),
 );
 
 /// Default Render deployment used by the event gateway. This can still be

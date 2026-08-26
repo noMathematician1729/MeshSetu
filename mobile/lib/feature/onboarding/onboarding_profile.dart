@@ -1,5 +1,7 @@
 import 'package:uuid/uuid.dart';
 
+import '../stt/stt_engine.dart';
+
 const _uuid = Uuid();
 
 /// CEAL-inspired personal profile retained locally until an SOS is finalized.
@@ -70,7 +72,9 @@ final class OnboardingProfile {
     if (canonicalE164(phone) == null) {
       return 'Enter your phone number in E.164 format, e.g. +919876543210.';
     }
-    if (language.trim().isEmpty) return 'Select a language.';
+    if (SttLanguage.fromDisplayName(language) == null) {
+      return 'Select one of the supported languages.';
+    }
     if (emergencyContacts.isEmpty) {
       return 'Add at least one emergency contact.';
     }
@@ -93,6 +97,16 @@ final class OnboardingProfile {
     name: name,
     phone: phone,
     language: language,
+    emergencyContacts: emergencyContacts,
+    medicalProfile: medicalProfile,
+  );
+
+  OnboardingProfile withLanguage(String value) => OnboardingProfile(
+    profileId: profileId,
+    reporterUid: reporterUid,
+    name: name,
+    phone: phone,
+    language: value.trim(),
     emergencyContacts: emergencyContacts,
     medicalProfile: medicalProfile,
   );

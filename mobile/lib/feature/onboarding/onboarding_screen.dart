@@ -9,6 +9,7 @@ import '../../app/providers.dart';
 import '../../ui/components/mesh_components.dart';
 import '../../ui/theme/mesh_tokens.dart';
 import 'onboarding_profile.dart';
+import '../stt/stt_engine.dart';
 
 /// Startup gate for the sender identity requirement. The profile is read from
 /// encrypted local storage; no enrollment network call is needed while offline.
@@ -79,6 +80,8 @@ class OnboardingScreen extends ConsumerStatefulWidget {
 
 enum _OnboardingSection { identity, contacts, gestures, medical }
 
+enum _LanguageModelState { checking, downloading, ready, failed }
+
 const _matteButtonStyle = ButtonStyle(
   elevation: WidgetStatePropertyAll(0),
   shadowColor: WidgetStatePropertyAll(Colors.transparent),
@@ -101,7 +104,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     with WidgetsBindingObserver {
   late final TextEditingController _name;
   late final TextEditingController _phone;
-  late final TextEditingController _language;
   late final TextEditingController _bloodGroup;
   late final TextEditingController _allergies;
   late final TextEditingController _conditions;
@@ -109,6 +111,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
   bool _saving = false;
   bool _checkingGestures = false;
   bool _gestureServiceEnabled = false;
+  late SttLanguage _language;
+  _LanguageModelState _languageModelState = _LanguageModelState.checking;
   String? _error;
   int _sectionIndex = 0;
 
@@ -150,7 +154,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     final profile = widget.initialProfile;
     _name = TextEditingController(text: profile?.name ?? '');
     _phone = TextEditingController(text: profile?.phone ?? '');
-    _language = TextEditingController(text: profile?.language ?? 'English');
+    _language =
+        SttLanguage.fromDisplayName(profile?.language ?? '') ??
+        SttLanguage.english;
     _bloodGroup = TextEditingController(
       text: profile?.medicalProfile.bloodGroup ?? '',
     );
@@ -165,6 +171,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
         _ContactEditors(contact),
       if ((profile?.emergencyContacts ?? const []).isEmpty) _ContactEditors(),
     ];
+    unawaited(_prepareLanguageModel(_language));
     if (_requiresGestureEnrollment) unawaited(_refreshGestureEnrollment());
   }
 
@@ -188,6 +195,35 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     }
   }
 
+  Future<void> _prepareLanguageModel(SttLanguage language) async {
+    if (mounted && _language == language) {
+      setState(() => _languageModelState = _LanguageModelState.checking);
+    }
+    final manager = ref.read(sttModelManagerProvider);
+    final ready = await manager.isReady(language);
+    if (mounted && _language != language) return;
+    if (ready) {
+      if (mounted) {
+        setState(() => _languageModelState = _LanguageModelState.ready);
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _languageModelState = _LanguageModelState.downloading);
+    }
+    try {
+      await manager.download(language);
+      if (mounted && _language == language) {
+        setState(() => _languageModelState = _LanguageModelState.ready);
+      }
+    } catch (_) {
+      if (mounted && _language == language) {
+        setState(() => _languageModelState = _LanguageModelState.failed);
+      }
+    }
+  }
+
   Future<void> _openGestureSettings() async {
     await EmergencyGestureSettings.openSettings();
     // Android will call `resumed` after Settings closes; this immediate check
@@ -200,7 +236,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     WidgetsBinding.instance.removeObserver(this);
     _name.dispose();
     _phone.dispose();
-    _language.dispose();
     _bloodGroup.dispose();
     _allergies.dispose();
     _conditions.dispose();
@@ -217,7 +252,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
         if (OnboardingProfile.canonicalE164(_phone.text) == null) {
           return 'Enter your phone number in E.164 format, e.g. +919876543210.';
         }
-        if (_language.text.trim().isEmpty) return 'Select a language.';
       case _OnboardingSection.contacts:
         if (_contacts.isEmpty) return 'Add at least one emergency contact.';
         if (_contacts.length > 10) {
@@ -240,7 +274,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     return null;
   }
 
-  void _continue() {
+  Future<void> _continue() async {
     final validationError = _validateCurrentSection();
     if (validationError != null) {
       setState(() => _error = validationError);
@@ -282,7 +316,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
       profileId: widget.initialProfile?.profileId,
       name: _name.text,
       phone: _phone.text,
-      language: _language.text,
+      language: _language.displayName,
       emergencyContacts: [
         for (var index = 0; index < _contacts.length; index++)
           EmergencyContact(
@@ -436,6 +470,32 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     children: [
       const MeshSectionTitle('Who are we helping?'),
       const SizedBox(height: MeshSpace.sm),
+      DropdownButtonFormField<SttLanguage>(
+        key: const Key('preferred-language-dropdown'),
+        initialValue: _language,
+        decoration: const InputDecoration(
+          labelText: 'Most comfortable language *',
+        ),
+        items: [
+          for (final language in SttLanguage.values)
+            DropdownMenuItem(
+              value: language,
+              child: Text(language.displayName),
+            ),
+        ],
+        onChanged: (language) {
+          if (language == null) return;
+          setState(() {
+            _language = language;
+            _languageModelState = _LanguageModelState.checking;
+            _error = null;
+          });
+          unawaited(_prepareLanguageModel(language));
+        },
+      ),
+      const SizedBox(height: MeshSpace.sm),
+      _languageModelStatus(context),
+      const SizedBox(height: MeshSpace.md),
       _field(_name, 'Your name', required: true),
       const SizedBox(height: MeshSpace.md),
       _field(
@@ -444,8 +504,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
         required: true,
         keyboardType: TextInputType.phone,
       ),
-      const SizedBox(height: MeshSpace.md),
-      _field(_language, 'Preferred language', required: true),
     ],
   );
 
@@ -468,6 +526,24 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
       ],
     ],
   );
+
+  Widget _languageModelStatus(BuildContext context) {
+    return switch (_languageModelState) {
+      _LanguageModelState.ready => Text(
+        '${_language.displayName} ready to be sent via voice.',
+      ),
+      _LanguageModelState.checking => Text(
+        'Checking ${_language.displayName} voice model…',
+      ),
+      _LanguageModelState.downloading => Text(
+        'Preparing ${_language.displayName} voice model in background…',
+      ),
+      _LanguageModelState.failed => Text(
+        '${_language.displayName} voice model could not download. It will retry when you select the language again.',
+        style: TextStyle(color: MeshPalette.of(context).ember),
+      ),
+    };
+  }
 
   Widget _gesturesSection(
     BuildContext context,
@@ -550,6 +626,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
 
   Widget _navigation(BuildContext context) {
     final isLast = _sectionIndex == _steps.length - 1;
+    final busy = _saving;
     return Row(
       children: [
         if (_sectionIndex > 0) ...[
@@ -559,7 +636,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
               label: 'Back',
               icon: Icons.arrow_back,
               secondary: true,
-              onPressed: _saving ? null : _back,
+              onPressed: busy ? null : _back,
             ),
           ),
           const SizedBox(width: MeshSpace.sm),
@@ -574,8 +651,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
                       : 'Save emergency profile'
                 : 'Continue',
             icon: isLast ? Icons.check : Icons.arrow_forward,
-            busy: _saving,
-            onPressed: _continue,
+            busy: busy,
+            onPressed: busy ? null : _continue,
           ),
         ),
       ],

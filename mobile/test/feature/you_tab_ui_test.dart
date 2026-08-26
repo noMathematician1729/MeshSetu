@@ -52,7 +52,31 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('renders a populated profile without ListTile rendering errors', (
+    testWidgets(
+      'renders a populated profile without ListTile rendering errors',
+      (tester) async {
+        final onboarding = OnboardingRepository(MemoryOnboardingStorage());
+        await onboarding.save(_profile());
+        final container = _container(onboarding: onboarding);
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(_app(container, const ProfileScreen()));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(find.text('Asha'), findsOneWidget);
+        expect(find.text('O+'), findsOneWidget);
+        expect(find.text('Ravi'), findsOneWidget);
+        // The pre-existing bug (Task 3 finding): ListTile placed directly
+        // inside MeshCard's DecoratedBox with no Material ancestor threw
+        // "ListTile background color or ink splashes may be invisible."
+        // This rewrite drops ListTile in favor of plain Row layouts, so no
+        // exception should surface here.
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('keeps the full language list scrollable on a short screen', (
       tester,
     ) async {
       final onboarding = OnboardingRepository(MemoryOnboardingStorage());
@@ -60,18 +84,15 @@ void main() {
       final container = _container(onboarding: onboarding);
       addTearDown(container.dispose);
 
+      await tester.binding.setSurfaceSize(const Size(360, 480));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_app(container, const ProfileScreen()));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pumpAndSettle();
 
-      expect(find.text('Asha'), findsOneWidget);
-      expect(find.text('O+'), findsOneWidget);
-      expect(find.text('Ravi'), findsOneWidget);
-      // The pre-existing bug (Task 3 finding): ListTile placed directly
-      // inside MeshCard's DecoratedBox with no Material ancestor threw
-      // "ListTile background color or ink splashes may be invisible."
-      // This rewrite drops ListTile in favor of plain Row layouts, so no
-      // exception should surface here.
+      await tester.tap(find.text('Preferred language'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DraggableScrollableSheet), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   });

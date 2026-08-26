@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../../ui/components/mesh_components.dart';
+import '../../ui/localization/mesh_localizations.dart';
 import '../../ui/theme/mesh_tokens.dart';
 import '../onboarding/onboarding_profile.dart';
 import '../onboarding/onboarding_screen.dart';
+import '../stt/stt_engine.dart';
 import 'settings_screen.dart';
 
 class ProfileScreen extends ConsumerWidget {
@@ -109,7 +111,10 @@ class _ProfileContent extends ConsumerWidget {
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                       Text(
-                        profile.language,
+                        context.meshL10n.languageName(
+                          SttLanguage.fromDisplayName(profile.language)?.code ??
+                              'en',
+                        ),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -130,6 +135,16 @@ class _ProfileContent extends ConsumerWidget {
               value: profile.reporterUid.toUpperCase(),
               icon: Icons.badge_outlined,
             ),
+          ),
+          const SizedBox(height: MeshSpace.sm),
+          MeshActionTile(
+            compact: true,
+            icon: Icons.language_outlined,
+            title: 'Preferred language',
+            subtitle: context.meshL10n.languageName(
+              SttLanguage.fromDisplayName(profile.language)?.code ?? 'en',
+            ),
+            onTap: () => _changeLanguage(context, ref),
           ),
           const SizedBox(height: MeshSpace.lg),
           const MeshSectionTitle('Medical information'),
@@ -215,6 +230,58 @@ class _ProfileContent extends ConsumerWidget {
 
   static String _available(String value) =>
       value.trim().isEmpty ? 'Not provided' : value.trim();
+
+  Future<void> _changeLanguage(BuildContext context, WidgetRef ref) async {
+    final current =
+        SttLanguage.fromDisplayName(profile.language) ?? SttLanguage.english;
+    final selected = await showModalBottomSheet<SttLanguage>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: .7,
+        minChildSize: .35,
+        maxChildSize: .92,
+        expand: false,
+        builder: (sheetContext, scrollController) => SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(MeshSpace.md),
+                child: Text(
+                  sheetContext.meshL10n.text('Preferred language'),
+                  style: Theme.of(sheetContext).textTheme.titleLarge,
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  controller: scrollController,
+                  children: [
+                    for (final language in SttLanguage.values)
+                      ListTile(
+                        title: Text(
+                          sheetContext.meshL10n.languageName(language.code),
+                        ),
+                        trailing: language == current
+                            ? const Icon(Icons.check)
+                            : null,
+                        onTap: () => Navigator.of(sheetContext).pop(language),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected == null || selected == current) return;
+
+    await ref
+        .read(onboardingRepositoryProvider)
+        .save(profile.withLanguage(selected.displayName));
+    ref.invalidate(onboardingProfileProvider);
+  }
 }
 
 class _InformationRow extends StatelessWidget {
@@ -244,7 +311,10 @@ class _InformationRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  context.meshL10n.text(title),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
                 Text(value, style: Theme.of(context).textTheme.bodyMedium),
               ],
             ),

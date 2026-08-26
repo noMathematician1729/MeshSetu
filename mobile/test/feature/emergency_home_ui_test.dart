@@ -289,6 +289,36 @@ void main() {
     expect(find.text('Type'), findsNothing);
   });
 
+  testWidgets('offers to record again when voice details are ready', (
+    tester,
+  ) async {
+    var recordings = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MeshTheme.light(),
+        home: EmergencyHomeScreen(
+          eventModeActive: true,
+          sending: false,
+          emergencyType: SosEmergencyType.general,
+          description: 'Need help near gate B',
+          holdSeconds: 3,
+          onSos: () {},
+          onProfile: () {},
+          onEmergencyType: () {},
+          onVoice: () => recordings++,
+          onDescribe: () {},
+          onCreateRoom: () {},
+          onJoinRoom: () {},
+        ),
+      ),
+    );
+
+    await tester.ensureVisible(find.text('Voice input'));
+    expect(find.text('Tap to record again'), findsOneWidget);
+    await tester.tap(find.text('Voice input'));
+    expect(recordings, 1);
+  });
+
   testWidgets('sending state switches the hero to the live ember accent', (
     tester,
   ) async {

@@ -20,6 +20,7 @@ import '../feature/join/join_screen.dart';
 import '../feature/location/location_capture.dart';
 import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/onboarding/onboarding_screen.dart';
+import '../feature/stt/stt_engine.dart';
 import '../feature/profile/profile_screen.dart';
 import '../feature/rooms/room_chat_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
@@ -700,6 +701,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   /// required — using Android's [SmsManager] via [DeviceSmsService].
   Future<void> _sendDeviceSmsForCompactSos(Map data) async {
     try {
+      // Preferred path: a relay device with internet resolves the victim's
+      // full record and texts *their* emergency contacts a detailed alert.
+      // Returns false when there is no connectivity, no configured control
+      // room, or the UID is not registered — in which case the original
+      // local-contact behaviour below still runs unchanged.
+      if (await _sendResolvedSosSms(data)) return;
+
       final profile = await _onboardingRepository.load();
       if (profile == null || profile.emergencyContacts.isEmpty) return;
 
@@ -732,6 +740,122 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     } catch (_) {
       // Device SMS failure must never interrupt the BLE relay or the admin
       // forwarding path.
+    }
+  }
+
+  /// Resolves the victim behind a compact SOS and texts their emergency
+  /// contacts the detailed alert. Returns true only if at least one SMS was
+  /// accepted by the platform, so the caller can fall back otherwise.
+  ///
+  /// This runs its own control-room lookup rather than reusing
+  /// [_forwardReceivedCealSos]'s result, deliberately keeping the BLE relay
+  /// and admin-forwarding path untouched. The lookup is idempotent: the
+  /// backend converges repeat compact alerts for the same UID and sequence
+  /// onto a single incident and de-duplicates its own notification fan-out.
+  Future<bool> _sendResolvedSosSms(Map data) async {
+    final url = _gatewayUrl;
+    final key = _gatewayDemoKey;
+    if (url.isEmpty || key.isEmpty) return false;
+
+    final originId = data['originId'] as int?;
+    final sequence = data['sequence'] as int?;
+    final advertisedUid = MeshSosAdvertisement.normalizeReporterUid(
+      data['reporterUid'] as String?,
+    );
+    final reporterUid = advertisedUid.isNotEmpty
+        ? advertisedUid
+        : originId != null
+        ? originId.toRadixString(16).padLeft(8, '0')
+        : '';
+    if (reporterUid.isEmpty) return false;
+
+    final Map<String, Object?>? resolvedVictim;
+    try {
+      final site = await _joinRepository.activeManifest();
+      final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+      final (success, _, body) = await bridge.forwardCealSos(
+        reporterUid: reporterUid,
+        siteId: site?.siteId ?? MeshEventController.demoSiteId,
+        flags: data['flags'] as int? ?? MeshSosAdvertisement.alertFlag,
+        originId: originId,
+        sequence: sequence,
+      );
+      final profile = success ? (body?['profile']) : null;
+      resolvedVictim = profile is Map ? profile.cast<String, Object?>() : null;
+    } catch (_) {
+      // Offline or control room unreachable: the caller's local-contact path
+      // remains the safety net.
+      return false;
+    }
+    final victim = resolvedVictim;
+    if (victim == null) return false;
+
+    final phones = _victimContactPhones(victim);
+    if (phones.isEmpty) return false;
+
+    final location = await _captureRelayLocation();
+    final message = DeviceSmsService.buildRelayAlertBody(
+      victimName: victim['name'] as String? ?? '',
+      victimPhone: victim['phone'] as String?,
+      bloodGroup: victim['blood_group'] as String?,
+      allergies: victim['allergies'] as String?,
+      conditions: victim['conditions'] as String?,
+      relayLatitude: location?.latitude,
+      relayLongitude: location?.longitude,
+      reporterUid: reporterUid,
+      sequence: sequence,
+    );
+
+    final sent = await DeviceSmsService.sendToAll(phones, message);
+    if (sent == 0) return false;
+    if (mounted) {
+      final victimName = (victim['name'] as String? ?? '').trim();
+      setState(
+        () => _status =
+            'MeshSetu\nSOS relayed · $sent emergency contact'
+            '${sent == 1 ? '' : 's'} of '
+            '${victimName.isEmpty ? 'the victim' : victimName} '
+            'notified with full details',
+      );
+    }
+    return true;
+  }
+
+  /// Emergency contact numbers from a resolved profile, including the primary
+  /// contact, de-duplicated so one person is not texted twice.
+  static List<String> _victimContactPhones(Map<String, Object?> profile) {
+    final phones = <String>{};
+    final primary = (profile['primary_contact_phone'] as String? ?? '').trim();
+    if (primary.isNotEmpty) phones.add(primary);
+    final contacts = profile['emergency_contacts'];
+    if (contacts is List) {
+      for (final contact in contacts) {
+        if (contact is! Map) continue;
+        final phone = (contact['phone'] as String? ?? '').trim();
+        if (phone.isNotEmpty) phones.add(phone);
+      }
+    }
+    return phones.toList(growable: false);
+  }
+
+  /// This relay device's own position, reported as the "relayer location".
+  ///
+  /// Deliberately never calls `Permission.request()`. BLE scanning in this app
+  /// depends on `Permission.locationWhenInUse` (see `core/ble/ble_permissions
+  /// .dart`: scan results infer physical proximity, so `neverForLocation` is
+  /// not usable). Requesting it from the relay path could therefore break
+  /// discovery in two ways: a user tapping "Don't allow" revokes the very
+  /// grant scanning needs, and a dialog raised while Event Mode is running its
+  /// own permission flow races that flow. Location is used only when it has
+  /// already been granted; otherwise the alert still goes out with medical
+  /// details and no coordinates.
+  Future<SosLocation?> _captureRelayLocation() async {
+    try {
+      if (!ref.read(locationSharingProvider)) return null;
+      if (!await Permission.locationWhenInUse.isGranted) return null;
+      return (await const LocationCapture().capture()).location;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -1422,15 +1546,25 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     });
     try {
       final engine = ref.read(offlineSttEngineProvider);
-      await engine.warmUp();
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      final language =
+          SttLanguage.fromDisplayName(profile?.language ?? '') ??
+          SttLanguage.english;
+      if (!await ref.read(sttModelManagerProvider).isReady(language)) {
+        throw StateError(
+          '${language.displayName} voice model is still preparing. Try voice '
+          'input again once it is ready.',
+        );
+      }
       final pcm = await _sttRecorder.recordPcmClip(
         duration: const Duration(seconds: 3),
       );
       if (!mounted) return;
       setState(() {
-        _sttStatus = 'transcribing ${pcm.length} bytes of PCM...';
+        _sttStatus =
+            'transcribing ${pcm.length} bytes of PCM in ${language.displayName}...';
       });
-      final result = await engine.transcribe(pcm);
+      final result = await engine.transcribe(pcm, language: language);
       if (!mounted) return;
       setState(() {
         if (result.text.trim().isNotEmpty) {
@@ -1444,6 +1578,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _sttStatus = 'STT failed: $error');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Voice input failed: $error')));
     } finally {
       if (mounted) setState(() => _sttTesting = false);
     }
