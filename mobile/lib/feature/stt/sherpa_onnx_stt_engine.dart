@@ -1,58 +1,40 @@
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 
 import 'stt_engine.dart';
+import 'stt_model_manager.dart';
 
-const _modelDirName = 'sherpa-onnx-zipformer-small-en-2023-06-26';
+final class SherpaOnnxMultilingualSttEngine implements OfflineSttEngine {
+  SherpaOnnxMultilingualSttEngine({required this.modelManager});
 
-final class SherpaOnnxEnglishSttEngine implements OfflineSttEngine {
-  SherpaOnnxEnglishSttEngine({
-    this.assetRoot = 'assets/models/$_modelDirName',
-    this.modelId = _modelDirName,
-  });
-
-  final String assetRoot;
-  final String modelId;
+  final SttModelManager modelManager;
 
   sherpa_onnx.OfflineRecognizer? _recognizer;
-  String? _resolvedModelDir;
+  SttLanguage? _recognizerLanguage;
 
   @override
-  Future<void> warmUp() async {
-    if (_recognizer != null) return;
+  Future<void> warmUp({SttLanguage language = SttLanguage.english}) async {
+    if (_recognizer != null && _recognizerLanguage == language) return;
 
     sherpa_onnx.initBindings();
-    final modelDir = await _ensureModelFiles();
+    final model = await _modelConfig(language);
 
-    final model = sherpa_onnx.OfflineModelConfig(
-      transducer: sherpa_onnx.OfflineTransducerModelConfig(
-        encoder: '$modelDir/encoder-epoch-99-avg-1.int8.onnx',
-        decoder: '$modelDir/decoder-epoch-99-avg-1.onnx',
-        joiner: '$modelDir/joiner-epoch-99-avg-1.int8.onnx',
-      ),
-      tokens: '$modelDir/tokens.txt',
-      numThreads: 2,
-      debug: false,
-      provider: 'cpu',
-      modelType: 'transducer',
-    );
-
-    _recognizer = sherpa_onnx.OfflineRecognizer(
+    final recognizer = sherpa_onnx.OfflineRecognizer(
       sherpa_onnx.OfflineRecognizerConfig(model: model),
     );
-    _resolvedModelDir = modelDir;
+    _recognizer?.free();
+    _recognizer = recognizer;
+    _recognizerLanguage = language;
   }
 
   @override
   Future<SttResult> transcribe(
     Uint8List pcm16le, {
     int sampleRateHz = 16000,
+    SttLanguage language = SttLanguage.english,
   }) async {
-    await warmUp();
+    await warmUp(language: language);
     if (pcm16le.isEmpty) {
       throw StateError('sherpa-onnx received empty PCM input');
     }
@@ -71,10 +53,10 @@ final class SherpaOnnxEnglishSttEngine implements OfflineSttEngine {
       final result = recognizer.getResult(stream);
       stopwatch.stop();
       return SttResult(
-        text: result.text.trim(),
+        text: validateSttTranscriptScript(result.text, language),
         confidence: 0.0,
         inferenceMs: stopwatch.elapsedMilliseconds,
-        modelId: modelId,
+        modelId: 'nemo-ctc:${language.code}',
       );
     } finally {
       stream.free();
@@ -85,42 +67,21 @@ final class SherpaOnnxEnglishSttEngine implements OfflineSttEngine {
   Future<void> close() async {
     _recognizer?.free();
     _recognizer = null;
-    _resolvedModelDir = null;
+    _recognizerLanguage = null;
   }
 
-  Future<String> _ensureModelFiles() async {
-    if (_resolvedModelDir != null) return _resolvedModelDir!;
-
-    final supportDir = await getApplicationSupportDirectory();
-    final targetDir = Directory('${supportDir.path}/models/$_modelDirName');
-    await targetDir.create(recursive: true);
-
-    for (final relativePath in _requiredFiles) {
-      final assetPath = '$assetRoot/$relativePath';
-      final output = File('${targetDir.path}/$relativePath');
-      if (await output.exists()) continue;
-
-      final data = await _loadRequiredAsset(assetPath);
-      await output.writeAsBytes(
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-        flush: true,
-      );
-    }
-
-    _resolvedModelDir = targetDir.path;
-    return targetDir.path;
-  }
-}
-
-Future<ByteData> _loadRequiredAsset(String assetPath) async {
-  try {
-    return await rootBundle.load(assetPath);
-  } catch (_) {
-    throw StateError(
-      'Missing model asset $assetPath. '
-      'Follow mobile/assets/models/README.md to download the sherpa-onnx '
-      'English model bundle into the repo, then rebuild the app with '
-      '`flutter clean && flutter run`.',
+  Future<sherpa_onnx.OfflineModelConfig> _modelConfig(
+    SttLanguage language,
+  ) async {
+    final files = await modelManager.filesFor(language);
+    return sherpa_onnx.OfflineModelConfig(
+      nemoCtc: sherpa_onnx.OfflineNemoEncDecCtcModelConfig(
+        model: files.model.path,
+      ),
+      tokens: files.tokens.path,
+      numThreads: 2,
+      debug: false,
+      provider: 'cpu',
     );
   }
 }
@@ -138,9 +99,47 @@ Float32List pcm16leToFloat32Samples(Uint8List pcm16le) {
   return out;
 }
 
-const List<String> _requiredFiles = <String>[
-  'encoder-epoch-99-avg-1.int8.onnx',
-  'decoder-epoch-99-avg-1.onnx',
-  'joiner-epoch-99-avg-1.int8.onnx',
-  'tokens.txt',
-];
+final _devanagariOnly = RegExp(
+  r'^[\u0900-\u097F\uA8E0-\uA8FF0-9\s.,!?…:;()\-—]+$',
+);
+final _gujaratiOnly = RegExp(
+  r'^[\u0A80-\u0AFF\u0964\u09650-9\s.,!?…:;()\-—]+$',
+);
+
+/// Refuses to insert a transcript in an unexpected script. This is a safety
+/// check, not a transliteration step: altering an Urdu transcript would make
+/// an emergency description less reliable.
+String validateSttTranscriptScript(String value, SttLanguage language) {
+  var text = value.trim();
+  if (language == SttLanguage.gujarati) {
+    text = _devanagariToGujarati(text);
+  }
+  final pattern = switch (language) {
+    SttLanguage.english => null,
+    SttLanguage.hindi || SttLanguage.marathi => _devanagariOnly,
+    SttLanguage.gujarati => _gujaratiOnly,
+  };
+  if (text.isNotEmpty && pattern != null && !pattern.hasMatch(text)) {
+    final requiredScript = language == SttLanguage.gujarati
+        ? 'Gujarati'
+        : 'Devanagari';
+    throw StateError(
+      '${language.displayName} voice input must be in $requiredScript script. '
+      'Please record it again.',
+    );
+  }
+  return text;
+}
+
+/// Gujarati and Devanagari place their equivalent letters at matching Unicode
+/// offsets. A Gujarati model can occasionally emit the Devanagari glyphs for
+/// otherwise correct Gujarati text; normalize only that script before the
+/// Gujarati-only safety check.
+String _devanagariToGujarati(String text) => String.fromCharCodes(
+  text.runes.map(
+    (rune) =>
+        (rune >= 0x0900 && rune <= 0x0963) || (rune >= 0x0966 && rune <= 0x097f)
+        ? rune + 0x0180
+        : rune,
+  ),
+);

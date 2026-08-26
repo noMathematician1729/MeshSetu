@@ -19,6 +19,7 @@ import '../feature/join/join_screen.dart';
 import '../feature/location/location_capture.dart';
 import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/onboarding/onboarding_screen.dart';
+import '../feature/stt/stt_engine.dart';
 import '../feature/profile/profile_screen.dart';
 import '../feature/rooms/room_chat_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
@@ -1391,15 +1392,25 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     });
     try {
       final engine = ref.read(offlineSttEngineProvider);
-      await engine.warmUp();
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      final language =
+          SttLanguage.fromDisplayName(profile?.language ?? '') ??
+          SttLanguage.english;
+      if (!await ref.read(sttModelManagerProvider).isReady(language)) {
+        throw StateError(
+          '${language.displayName} voice model is still preparing. Try voice '
+          'input again once it is ready.',
+        );
+      }
       final pcm = await _sttRecorder.recordPcmClip(
         duration: const Duration(seconds: 3),
       );
       if (!mounted) return;
       setState(() {
-        _sttStatus = 'transcribing ${pcm.length} bytes of PCM...';
+        _sttStatus =
+            'transcribing ${pcm.length} bytes of PCM in ${language.displayName}...';
       });
-      final result = await engine.transcribe(pcm);
+      final result = await engine.transcribe(pcm, language: language);
       if (!mounted) return;
       setState(() {
         if (result.text.trim().isNotEmpty) {
@@ -1413,6 +1424,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _sttStatus = 'STT failed: $error');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Voice input failed: $error')));
     } finally {
       if (mounted) setState(() => _sttTesting = false);
     }

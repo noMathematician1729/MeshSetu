@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:meshsetu_mobile/app/providers.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_repository.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_screen.dart';
+import 'package:meshsetu_mobile/feature/stt/stt_model_manager.dart';
 
 Future<void> _tapOnboardingButton(WidgetTester tester, String label) async {
   final button = find.text(label);
@@ -37,6 +38,9 @@ void main() {
           onboardingRepositoryProvider.overrideWithValue(
             OnboardingRepository(storage),
           ),
+          sttModelManagerProvider.overrideWithValue(
+            SttModelManager(manifests: const {}),
+          ),
         ],
         child: const MaterialApp(
           home: OnboardingScreen(requireGestureEnrollment: true),
@@ -48,7 +52,6 @@ void main() {
     expect(find.text('STEP 1 OF 4'), findsOneWidget);
     await tester.enterText(find.byType(TextField).at(0), 'Asha Patel');
     await tester.enterText(find.byType(TextField).at(1), '+919876543210');
-    await tester.enterText(find.byType(TextField).at(2), 'English');
     await _tapOnboardingButton(tester, 'Continue');
 
     await tester.enterText(find.byType(TextField).at(0), 'Ravi Patel');
