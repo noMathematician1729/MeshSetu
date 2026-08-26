@@ -3,3 +3,4 @@
 build/
 .flutter-plugins-dependencies
 mobile/pubspec.lock
+mobile/ios

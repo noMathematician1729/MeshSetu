@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/ble/sos_advertisement.dart';
 import '../../ui/components/mesh_components.dart';
+import '../../ui/localization/mesh_localizations.dart';
 import '../../ui/theme/mesh_tokens.dart';
 
 /// Home tab hero. Signal-lattice hero surface with the SOS button as the
@@ -71,7 +72,7 @@ class EmergencyHomeScreen extends StatelessWidget {
                           const MeshMicroLabel('MeshSetu'),
                           const Spacer(),
                           IconButton(
-                            tooltip: 'Open profile',
+                            tooltip: context.meshL10n.text('Open profile'),
                             onPressed: onProfile,
                             icon: const Icon(Icons.account_circle_outlined),
                           ),
@@ -79,13 +80,13 @@ class EmergencyHomeScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: MeshSpace.sm),
                       Text(
-                        'Emergency Aid',
+                        context.meshL10n.text('Emergency Aid'),
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.displaySmall,
                       ),
                       const SizedBox(height: MeshSpace.xs),
                       Text(
-                        'One tap away from help',
+                        context.meshL10n.text('One tap away from help'),
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
@@ -100,8 +101,10 @@ class EmergencyHomeScreen extends StatelessWidget {
                       const SizedBox(height: MeshSpace.md),
                       Text(
                         sending
-                            ? 'Preparing your encrypted emergency packet…'
-                            : 'Press and hold for $holdSeconds seconds to activate emergency protocol',
+                            ? context.meshL10n.text(
+                                'Preparing your encrypted emergency packet…',
+                              )
+                            : context.meshL10n.holdToActivate(holdSeconds),
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
@@ -160,7 +163,7 @@ class EmergencyHomeScreen extends StatelessWidget {
                               child: FilledButton.icon(
                                 onPressed: onCreateRoom,
                                 icon: const Icon(Icons.add_circle_outline),
-                                label: const Text('Create'),
+                                label: Text(context.meshL10n.text('Create')),
                               ),
                             ),
                             const SizedBox(width: MeshSpace.sm),
@@ -168,7 +171,7 @@ class EmergencyHomeScreen extends StatelessWidget {
                               child: OutlinedButton.icon(
                                 onPressed: onJoinRoom,
                                 icon: const Icon(Icons.qr_code_scanner),
-                                label: const Text('Join'),
+                                label: Text(context.meshL10n.text('Join')),
                               ),
                             ),
                           ],

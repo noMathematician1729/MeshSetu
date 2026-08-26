@@ -61,6 +61,15 @@ void main() {
     expect(() => repository.save(invalid), throwsArgumentError);
   });
 
+  test('profile language can change without replacing identity details', () {
+    final profile = sampleProfile();
+    final updated = profile.withLanguage('Gujarati');
+
+    expect(updated.language, 'Gujarati');
+    expect(updated.name, profile.name);
+    expect(updated.reporterUid, profile.reporterUid);
+  });
+
   test('onboarding stores canonical E.164 phone numbers', () async {
     final profile = OnboardingProfile.create(
       profileId: 'e164-profile',

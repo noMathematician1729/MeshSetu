@@ -10,6 +10,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   protobuf: ^6.0.0
   cryptography: ^2.7.0
   collection: ^1.19.0

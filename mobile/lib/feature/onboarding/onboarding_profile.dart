@@ -101,6 +101,16 @@ final class OnboardingProfile {
     medicalProfile: medicalProfile,
   );
 
+  OnboardingProfile withLanguage(String value) => OnboardingProfile(
+    profileId: profileId,
+    reporterUid: reporterUid,
+    name: name,
+    phone: phone,
+    language: value.trim(),
+    emergencyContacts: emergencyContacts,
+    medicalProfile: medicalProfile,
+  );
+
   Map<String, Object?> toJson() => {
     'profileId': profileId,
     'reporterUid': reporterUid,

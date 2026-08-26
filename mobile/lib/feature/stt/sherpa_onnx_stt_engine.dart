@@ -18,13 +18,17 @@ final class SherpaOnnxMultilingualSttEngine implements OfflineSttEngine {
     if (_recognizer != null && _recognizerLanguage == language) return;
 
     sherpa_onnx.initBindings();
+    // A recognizer owns its model and tokenizer natively. Release the old
+    // language before opening another one so a changed profile can never
+    // continue decoding through the previous language's recognizer.
+    _recognizer?.free();
+    _recognizer = null;
+    _recognizerLanguage = null;
     final model = await _modelConfig(language);
 
-    final recognizer = sherpa_onnx.OfflineRecognizer(
+    _recognizer = sherpa_onnx.OfflineRecognizer(
       sherpa_onnx.OfflineRecognizerConfig(model: model),
     );
-    _recognizer?.free();
-    _recognizer = recognizer;
     _recognizerLanguage = language;
   }
 
