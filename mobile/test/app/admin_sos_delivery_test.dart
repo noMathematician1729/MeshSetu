@@ -191,6 +191,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
       expect(bodies, hasLength(1));
+      expect(bodies.single['relay_device_id'], 'gateway');
       final event = (bodies.single['event'] as Map).cast<String, Object?>();
       expect(event['event_id'], 'evt-3');
       expect(event['incident_type'], 'medical');

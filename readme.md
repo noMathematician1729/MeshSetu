@@ -31,6 +31,19 @@ cd admin/server && npm ci && npm test && npm run build
 cd admin/client && npm ci && npm run build
 ```
 
+Return-channel evidence and operations:
+
+```bash
+python3 tools/acceptance_harness.py
+python3 tools/meshsetu_packet_simulator.py --hops 2 --failed-relay 0 --duplicates 1 --restart \
+  | python3 tools/meshsetu_log_parser.py
+```
+
+See `docs/ADR-001-sos-return-channel.md`, `docs/THREAT_MODEL.md`,
+`docs/RETURN_CHANNEL_RUNBOOK.md`, `docs/OBSERVABILITY.md`, and
+`docs/PHYSICAL_BLE_ACCEPTANCE.md`. The simulator is deterministic topology
+coverage only; it is not a substitute for the physical Android BLE matrix.
+
 Install `mobile/build/app/outputs/flutter-apk/app-debug.apk` on physical BLE-capable Android phones. Tap **Start event mode** to request permissions and start the visible connected-device foreground service. The foreground task owns scanning and relay processing, so leaving the screen does not stop the mesh; use **Stop event mode** to shut it down.
 
 ## Current transport slice

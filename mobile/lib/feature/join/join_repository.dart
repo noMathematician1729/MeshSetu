@@ -123,6 +123,14 @@ class JoinRepository {
             siteName: manifest.siteName,
             meshCode: manifest.meshCode,
             gatewayHint: Value(manifest.gatewayHint),
+            authorityKeyId: Value(
+              manifest.authorityKeyId.isEmpty ? null : manifest.authorityKeyId,
+            ),
+            authorityPublicKeyJwk: Value(
+              manifest.authorityPublicKeyJwk == null
+                  ? null
+                  : jsonEncode(manifest.authorityPublicKeyJwk),
+            ),
             validFromMs: manifest.validFromMs,
             validUntilMs: manifest.validUntilMs,
             roomsJson: jsonEncode([
@@ -157,6 +165,8 @@ class JoinRepository {
       validFromMs: current.validFromMs,
       validUntilMs: current.validUntilMs,
       gatewayHint: current.gatewayHint,
+      authorityKeyId: current.authorityKeyId,
+      authorityPublicKeyJwk: current.authorityPublicKeyJwk,
       rooms: [...current.rooms, room],
     );
     await activateManifest(updated);
@@ -176,6 +186,12 @@ class JoinRepository {
       validFromMs: row.validFromMs,
       validUntilMs: row.validUntilMs,
       gatewayHint: row.gatewayHint ?? '',
+      authorityKeyId: row.authorityKeyId ?? '',
+      authorityPublicKeyJwk: row.authorityPublicKeyJwk == null
+          ? null
+          : Map<String, String>.from(
+              jsonDecode(row.authorityPublicKeyJwk!) as Map,
+            ),
       rooms: [
         for (final r in roomsRaw)
           RoomManifest(

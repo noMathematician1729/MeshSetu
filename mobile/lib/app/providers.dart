@@ -83,7 +83,7 @@ final offlineSttEngineProvider = Provider<OfflineSttEngine>(
 
 /// Default Render deployment used by the event gateway. This can still be
 /// overridden from the Gateway screen for local development or another site.
-const productionBackendUrl = 'https://sih26-1xdevs.onrender.com';
+const productionBackendUrl = 'https://kisha-volcanologic-motherly.ngrok-free.dev';
 
 final gatewayUrlProvider = StateProvider<String>((ref) => productionBackendUrl);
 final gatewayEnabledProvider = StateProvider<bool>((ref) => true);

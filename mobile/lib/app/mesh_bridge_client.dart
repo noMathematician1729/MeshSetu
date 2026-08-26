@@ -12,7 +12,9 @@ import '../core/data/outbox_sender.dart';
 import '../core/model/model.dart';
 import '../core/protocol/envelope_codec.dart';
 import '../core/protocol/relay_engine.dart';
+import '../core/protocol/return_protocol.dart';
 import '../feature/gateway/gateway_bridge.dart';
+import '../feature/gateway/gateway_downlink_poller.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
@@ -151,6 +153,7 @@ class MeshBridgeClient {
   OutboxSender? _outbox;
   bool _listening = false;
   GatewayBridge? _gatewayBridge;
+  GatewayDownlinkPoller? _gatewayDownlink;
   String? _siteId;
   int? _localEphemeralId;
   final Map<int, Completer<void>> _pendingSubmissions = {};
@@ -230,8 +233,11 @@ class MeshBridgeClient {
     if (bridge == null) {
       _adminDeliveryTimer?.cancel();
       _adminDeliveryTimer = null;
+      unawaited(_gatewayDownlink?.dispose());
+      _gatewayDownlink = null;
       return;
     }
+    _ensureGatewayDownlink();
     unawaited(_syncRelayInbox());
     // Attaching the gateway is the trigger for anything queued while this
     // device had no admin route configured.
@@ -239,11 +245,31 @@ class MeshBridgeClient {
     unawaited(_deliverToAdmin());
   }
 
+  void _ensureGatewayDownlink() {
+    if (_gatewayDownlink != null ||
+        _gatewayBridge == null ||
+        _siteId == null ||
+        _localEphemeralId == null) {
+      return;
+    }
+    final poller = GatewayDownlinkPoller(
+      bridge: _gatewayBridge!,
+      database: _db,
+      siteId: _siteId!,
+      gatewaySessionId: _localEphemeralId!.toString(),
+      localEphemeralId: _localEphemeralId!,
+      submitToMesh: _sendToMesh,
+    );
+    _gatewayDownlink = poller;
+    poller.start();
+  }
+
   void start({required String siteId, required int localEphemeralId}) {
     _ensureTaskDataListener();
     _siteId = siteId;
     _localEphemeralId = localEphemeralId;
     _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   /// Attaches this client to a site before the foreground task has reported
@@ -253,7 +279,12 @@ class MeshBridgeClient {
     _ensureTaskDataListener();
     final changed = _siteId != siteId;
     _siteId = siteId;
+    if (changed) {
+      unawaited(_gatewayDownlink?.dispose());
+      _gatewayDownlink = null;
+    }
     if (changed && _localEphemeralId != null) _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   /// Requests the identity from an already-running foreground task. This is
@@ -277,6 +308,7 @@ class MeshBridgeClient {
     }
     _localEphemeralId = localEphemeralId;
     if (_siteId != null) _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   void _activateOutbox() {
@@ -394,6 +426,20 @@ class MeshBridgeClient {
     } finally {
       _submissionTimers.remove(envelope.objectId)?.cancel();
       _pendingSubmissions.remove(envelope.objectId);
+    }
+  }
+
+  Future<void> _handleGatewayReceipt(ReceivedObject received) async {
+    final poller = _gatewayDownlink;
+    if (poller == null || received.envelope.payloadType != PayloadType.ack) {
+      return;
+    }
+    try {
+      await poller.handleReceipt(
+        ReturnProtocol.decodeAck(received.envelope.payload),
+      );
+    } catch (_) {
+      // Malformed or unrelated ACKs remain ordinary mesh traffic.
     }
   }
 
@@ -540,6 +586,7 @@ class MeshBridgeClient {
         final received = MeshBridge.receivedFromJson(
           receivedJson.cast<Object?, Object?>(),
         );
+        unawaited(_handleGatewayReceipt(received));
         unawaited(_storeReceived(received));
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
@@ -653,6 +700,7 @@ class MeshBridgeClient {
             createdAtMs: row.createdAtMs,
             expiresAtMs: row.expiresAtMs,
           ),
+          relayDeviceId: _localEphemeralId?.toString() ?? 'gateway',
         );
         _adminDeliveredEventIds.add(row.eventId);
       } catch (_) {
@@ -870,6 +918,8 @@ class MeshBridgeClient {
   }
 
   Future<void> dispose() async {
+    await _gatewayDownlink?.dispose();
+    _gatewayDownlink = null;
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
     _adminDeliveryTimer?.cancel();

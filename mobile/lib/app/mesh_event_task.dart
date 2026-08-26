@@ -9,9 +9,14 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart'
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../core/ble/device_key_store.dart';
+import '../core/data/database.dart';
+import '../core/protocol/authority_signature.dart';
+import '../core/protocol/return_protocol.dart';
+import '../core/security/authority_key_store.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
+import '../feature/join/join_repository.dart';
 import '../feature/sos/sos_payload.dart';
 import 'event_mode_launcher.dart';
 import 'mesh_bridge.dart';
@@ -74,6 +79,46 @@ Future<void> _showSosNotification({
   }
 }
 
+Future<void> _showVerifiedAuthorityResponse(
+  ResponderUpdateBodyData response,
+) async {
+  try {
+    if (!_sosNotificationsInitialized) {
+      await NotificationRouter.configure(_sosNotifications);
+      _sosNotificationsInitialized = true;
+    }
+    var id = response.responseId.hashCode & 0x7fffffff;
+    if (id == 0) id = 1;
+    await _sosNotifications.show(
+      id: id,
+      title: 'Verified authority update · ${response.type.name}',
+      body: response.messageText,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Verified MeshSetu authority responses',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          ticker: 'Verified authority update',
+          category: AndroidNotificationCategory.message,
+          visibility: NotificationVisibility.public,
+          onlyAlertOnce: true,
+        ),
+      ),
+      payload: NotificationRouter.incidentPayload(
+        siteId: response.siteId,
+        eventId: response.replyToEventId,
+        objectId: 0,
+      ),
+    );
+  } catch (_) {
+    // A notification failure must not stop BLE relaying or receipt creation.
+  }
+}
+
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
   final shown = await SosAlertNotifications.show(
     id: SosAlertNotifications.idForKey(alert.dedupeKey),
@@ -123,6 +168,8 @@ class _MeshEventTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     DartPluginRegistrant.ensureInitialized();
+    MeshEventController? startedController;
+    MeshDatabase? runtimeDatabase;
     try {
       final savedConfiguration = await FlutterForegroundTask.getData<String>(
         key: meshSiteConfigurationKey,
@@ -131,9 +178,65 @@ class _MeshEventTaskHandler extends TaskHandler {
           ? MeshSiteConfiguration.demo
           : MeshSiteConfiguration.decode(savedConfiguration) ??
                 MeshSiteConfiguration.demo;
+      final database = MeshDatabase();
+      runtimeDatabase = database;
+      final joinRepository = JoinRepository(database);
+      Future<AuthorityTrustSnapshot?> resolveAuthorityTrust() async {
+        try {
+          final manifest = await joinRepository.activeManifest();
+          if (manifest == null ||
+              manifest.authorityKeyId.isEmpty ||
+              manifest.authorityPublicKeyJwk == null) {
+            return null;
+          }
+          final publicKey = AuthorityKeyStore().resolve(
+            manifest: manifest,
+            keyId: manifest.authorityKeyId,
+          );
+          if (publicKey == null) return null;
+          return AuthorityTrustSnapshot(
+            siteId: manifest.siteId,
+            keyId: manifest.authorityKeyId,
+            publicKey: publicKey,
+          );
+        } catch (_) {
+          return null;
+        }
+      }
+
+      Future<bool> isKnownSosEvent(String eventId) async {
+        final outbox = await (database.select(
+          database.outboxEvents,
+        )..where((table) => table.eventId.equals(eventId))).getSingleOrNull();
+        if (outbox?.siteId == configuration.siteId &&
+            outbox?.payloadType == PayloadType.structuredSos.name) {
+          return true;
+        }
+        final inbox = await (database.select(
+          database.inboxEvents,
+        )..where((table) => table.eventId.equals(eventId))).getSingleOrNull();
+        return inbox?.siteId == configuration.siteId &&
+            inbox?.payloadType == PayloadType.structuredSos.name;
+      }
+
       final controller = MeshEventController(
         configuration: configuration,
+        database: database,
         zoneResolver: MeshEventController.demoZoneResolver,
+        authorityTrustSnapshot: resolveAuthorityTrust,
+        isKnownSosEvent: isKnownSosEvent,
+        onVerifiedAuthorityResponse: (response) async {
+          FlutterForegroundTask.sendDataToMain({
+            'status': 'verified_authority_response',
+            'responseId': response.responseId,
+            'eventId': response.replyToEventId,
+            'siteId': response.siteId,
+            'responseType': response.type.name,
+            'messageText': response.messageText,
+            'createdAtMs': response.createdAtMs,
+          });
+          await _showVerifiedAuthorityResponse(response);
+        },
         onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_peers',
           'peers': [
@@ -185,6 +288,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         }),
         onCompactSosAlert: _announceCompactSos,
       );
+      startedController = controller;
       await controller.start();
       _controller = controller;
       _incomingSubscription = controller.coordinator?.incoming.listen((
@@ -228,6 +332,10 @@ class _MeshEventTaskHandler extends TaskHandler {
         unawaited(_sendTestSos(controller));
       }
     } catch (error) {
+      if (_controller == null) {
+        await startedController?.stop();
+        if (startedController == null) await runtimeDatabase?.close();
+      }
       final message = error is DeviceKeyStoreException
           ? error.userMessage
           : error.toString();

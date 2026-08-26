@@ -1,0 +1,14 @@
+{
+  "algorithm": "ECDSA_P256_SHA256",
+  "signatureEncoding": "IEEE_P1363",
+  "keyId": "meshsetu-authority-dev-v1",
+  "publicKeyJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "CSkxM4rIb1P71GElJNWJWx0v2ar5XQrmEBLo8_ABdpo",
+    "y": "BD791JO0cRceJv6XRMpSVz3bhYOsbKyHU0ZJOx1OXTA"
+  },
+  "bodyB64": "ChFyZXNwb25zZS12ZWN0b3ItMRIOZXZlbnQtdmVjdG9yLTEZFc1bBwAAAAAgASoiWW91ciBTT1MgcmVhY2hlZCB0aGUgY29udHJvbCByb29tLjCA0JX/vDE44Pen/7wxQgt2ZWN0b3Itc2l0ZUoQAAECAwQFBgcICQoLDA0ODw==",
+  "signatureB64": "J9JONMgwXRo3YVg4WK8sT7k5eDp7gOABZRkwVVgdI9IQalKlUIDkNyKwuKTAYtn7x/oes0VGAhW8IPGpcKnhTw==",
+  "signedB64": "Cn8KEXJlc3BvbnNlLXZlY3Rvci0xEg5ldmVudC12ZWN0b3ItMRkVzVsHAAAAACABKiJZb3VyIFNPUyByZWFjaGVkIHRoZSBjb250cm9sIHJvb20uMIDQlf+8MTjg96f/vDFCC3ZlY3Rvci1zaXRlShAAAQIDBAUGBwgJCgsMDQ4PEkAn0k40yDBdGjdhWDhYryxPuTl4OnuA4AFlGTBVWB0j0hBqUqVQgOQ3IrC4pMBi2fvH+h6zRUYCFbwg8alwqeFPGhltZXNoc2V0dS1hdXRob3JpdHktZGV2LXYxIAE="
+}

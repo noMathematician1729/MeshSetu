@@ -5,11 +5,12 @@ import jwt from 'jsonwebtoken'
 import { WebSocketServer } from 'ws'
 import { z } from 'zod'
 import { decryptPacket } from './protocol/mesh.js'
-import { createHash } from 'node:crypto'
-import { store } from './store.js'
+import { createHash, randomUUID } from 'node:crypto'
+import { store, type AuthorityResponseRecord } from './store.js'
 import { triageSos } from './triage.js'
 import { findNearbyAuthorities } from './authorities.js'
 import { buildCompactEmergencySms, buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
+import { encodeAndSignResponderUpdate, authorityKeyId, authorityPublicKeyJwk } from './authority_signing.js'
 import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
 import { indianSubscriberNumber } from './fast2sms.js'
 
@@ -211,13 +212,14 @@ app.get('/v1/public/sos/:eventId', async (req, res) => { const event = await sto
 app.get('/v1/notifications/:recipientUid', async (req, res) => res.json(await store.notificationsFor(`contact:${String(req.params.recipientUid)}`)))
 
 const relaySosSchema = z.object({
+
   relay_device_id: z.string().min(1).max(128),
   event: z.object({
     event_id: z.string().min(1), object_id: z.string().min(1), site_id: z.string().min(1), room_id: z.string().default('public'),
     priority: z.string().default('p0Critical'), incident_type: z.string().default('compact_sos'), transcript: z.string().nullable().optional(),
     zone: z.string().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional(),
     hops: z.number().int().nonnegative().default(0), relay_latency_ms: z.number().int().nonnegative().default(0), created_at_ms: z.number(), expires_at_ms: z.number(), reporter_uid: z.string().nullable().optional(),
-  }),
+    origin_ephemeral_id: z.union([z.string(), z.number()]).transform(String).nullable().optional(), ingress_gateway_session_id: z.string().nullable().optional(), trace_id: z.string().nullable().optional(), forward_hop_count: z.number().int().nonnegative().nullable().optional(),  }),
 })
 app.post('/v1/gateway/relay-sos', gateway, async (req, res) => {
   const parsed = relaySosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid relay SOS', details: parsed.error.issues })
@@ -229,7 +231,7 @@ app.post('/v1/gateway/relay-sos', gateway, async (req, res) => {
   res.json({ ok: true, event: record, public_url: publicIncidentUrl(source.event_id) })
 })
 
-const packetSchema = z.object({ site_id: z.string().min(1), object_id: z.union([z.string(), z.number()]).transform(String), packet_b64: z.string().min(1), peer_id: z.string().optional(), received_at_ms: z.number().optional() })
+const packetSchema = z.object({ site_id: z.string().min(1), object_id: z.union([z.string(), z.number()]).transform(String), packet_b64: z.string().min(1), peer_id: z.string().optional(), gateway_session_id: z.string().optional(), received_at_ms: z.number().optional() })
 app.post('/v1/gateway/objects', gateway, async (req, res) => {
   const parsed = packetSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid packet request', details: parsed.error.issues })
   try {
@@ -248,7 +250,7 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
             decoded.envelope.siteId,
           )
         : undefined
-      const record = await triageP0(await store.upsert({ event_id: compact?.event_id ?? decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null, compact_sequence: compact?.compact_sequence ?? compactSequence }))
+      const record = await triageP0(await store.upsert({ event_id: compact?.event_id ?? decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, origin_ephemeral_id: decoded.envelope.originEphemeralId, ingress_gateway_session_id: parsed.data.gateway_session_id ?? null, trace_id: decoded.envelope.traceId, forward_hop_count: decoded.envelope.hopCount, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null, compact_sequence: compact?.compact_sequence ?? compactSequence }))
       await fanOutIncident(record, 'new')
       emit('incident', record); return res.json({ ok: true, verified: true, event: record })
     }
@@ -263,6 +265,112 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
   } catch (error: any) { return res.status(422).json({ error: error?.message || 'packet rejected', verified: false }) }
 })
 
+const authorityResponseRequestSchema = z.object({
+  type: z.enum(['SOS_RECEIVED', 'HELP_DISPATCHED', 'SAFETY_GUIDANCE', 'INCIDENT_CLOSED']),
+  message_text: z.string().min(1).max(1024),
+  expires_in_seconds: z.number().int().positive().max(3600).default(300),
+})
+const publicAuthorityResponse = (row: AuthorityResponseRecord) => ({
+  response_id: row.response_id,
+  event_id: row.event_id,
+  site_id: row.site_id,
+  destination_ephemeral_id: row.destination_ephemeral_id,
+  response_type: row.response_type,
+  message_text: row.message_text,
+  key_id: row.key_id,
+  state: row.state,
+  route_mode: row.route_mode,
+  return_hops: row.return_hops,
+  retry_count: row.retry_count,
+  created_at_ms: row.created_at_ms,
+  expires_at_ms: row.expires_at_ms,
+})
+
+app.get('/v1/authority/public-key', (_req, res) => res.json({ algorithm: 'ECDSA_P256_SHA256', key_id: authorityKeyId(), public_key_jwk: authorityPublicKeyJwk() }))
+app.post('/v1/events/:eventId/responses', bearer, async (req, res) => {
+  const parsed = authorityResponseRequestSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: 'invalid authority response', details: parsed.error.issues })
+  if (Buffer.byteLength(parsed.data.message_text, 'utf8') > 256) return res.status(413).json({ error: 'message_text exceeds 256 UTF-8 bytes' })
+  const eventId = String(req.params.eventId)
+  const event = await store.get(eventId)
+  if (!event) return res.status(404).json({ error: 'event not found' })
+  if (parsed.data.type === 'HELP_DISPATCHED' && event.status !== 'dispatched') return res.status(403).json({ error: 'HELP_DISPATCHED requires a dispatched incident' })
+  if (parsed.data.type === 'INCIDENT_CLOSED' && event.status !== 'resolved') return res.status(403).json({ error: 'INCIDENT_CLOSED requires a resolved incident' })
+  const destination = String(event.origin_ephemeral_id ?? '')
+  if (!/^(0|[1-9][0-9]*)$/.test(destination)) return res.status(422).json({ error: 'event has no valid sender ephemeral ID' })
+  const now = Date.now()
+  const expiresAtMs = Math.min(Number(event.expires_at_ms ?? now + parsed.data.expires_in_seconds * 1000), now + parsed.data.expires_in_seconds * 1000)
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= now) return res.status(422).json({ error: 'event response window has expired' })
+  try {
+    const responseId = randomUUID()
+    const signed = await encodeAndSignResponderUpdate({
+      responseId, replyToEventId: eventId, destinationEphemeralId: destination,
+      type: parsed.data.type, messageText: parsed.data.message_text, createdAtMs: now,
+      expiresAtMs, siteId: String(event.site_id), originalTraceId: event.trace_id ? Buffer.from(event.trace_id) : undefined,
+    })
+    const record: AuthorityResponseRecord = {
+      response_id: responseId, event_id: eventId, site_id: String(event.site_id),
+      response_type: parsed.data.type, message_text: parsed.data.message_text, destination_ephemeral_id: destination,
+      signed_payload: signed.signedBytes, key_id: signed.keyId, state: 'SIGNED', route_mode: null,
+      return_hops: 0, retry_count: 0, created_at_ms: now, expires_at_ms: expiresAtMs,
+      gateway_session_id: null, trace_id: null, original_trace_id: event.trace_id ? Buffer.from(event.trace_id) : null,
+    }
+    const idempotencyKey = req.header('idempotency-key')?.trim()
+    if (!idempotencyKey) return res.status(400).json({ error: 'Idempotency-Key header is required' })
+    const requestHash = createHash('sha256').update(JSON.stringify({ eventId, ...parsed.data })).digest('hex')
+    const outcome = await store.createAuthorityResponse(record, idempotencyKey, requestHash)
+    if (outcome.conflict) return res.status(409).json({ error: 'idempotency key was reused with a different request' })
+    if (!outcome.record) return res.status(500).json({ error: 'response persistence failed' })
+    const response = { ...publicAuthorityResponse(outcome.record), signed_payload_b64: outcome.record.signed_payload.toString('base64'), replayed: outcome.replay }
+    emit('authority-response', response)
+    return res.status(outcome.replay ? 200 : 201).json(response)
+  } catch (error: any) {
+    return res.status(422).json({ error: error?.message || 'response signing failed' })
+  }
+})
+
+const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+app.get('/v1/gateways/:gatewaySessionId/commands', gateway, async (req, res) => {
+  const query = z.object({ cursor: z.string().regex(/^(0|[1-9][0-9]*)(?::[A-Za-z0-9-]+)?$/).optional(), wait_ms: z.coerce.number().int().min(0).max(15000).default(15000), limit: z.coerce.number().int().min(1).max(20).default(20) }).safeParse(req.query)
+  if (!query.success) return res.status(400).json({ error: 'invalid gateway command query' })
+  const deadline = Date.now() + query.data.wait_ms
+  let commands: AuthorityResponseRecord[] = []
+  do {
+    commands = await store.pendingGatewayCommands(String(req.params.gatewaySessionId), query.data.cursor, query.data.limit)
+    if (commands.length || Date.now() >= deadline) break
+    await delay(Math.min(250, Math.max(1, deadline - Date.now())))
+  } while (Date.now() < deadline)
+  const nextCursor = commands.length ? `${commands[commands.length - 1].created_at_ms}:${commands[commands.length - 1].response_id}` : (query.data.cursor ?? '0')
+  return res.json({ cursor: nextCursor, commands: commands.map(command => ({ ...publicAuthorityResponse(command), signed_payload_b64: command.signed_payload.toString('base64') })) })
+})
+
+app.post('/v1/gateways/:gatewaySessionId/commands/:responseId/received', gateway, async (req, res) => {
+  const parsed = z.object({ mesh_object_id: z.union([z.string(), z.number()]).transform(String).optional() }).safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: 'invalid command receipt' })
+  const row = await store.markGatewayReceived(String(req.params.responseId), String(req.params.gatewaySessionId), parsed.data.mesh_object_id)
+  if (!row) return res.status(404).json({ error: 'response not found or already claimed' })
+  emit('authority-response', publicAuthorityResponse(row))
+  return res.json({ ok: true, response: publicAuthorityResponse(row) })
+})
+
+app.post('/v1/responses/:responseId/receipts', gateway, async (req, res) => {
+  const parsed = z.object({ receipt_id: z.string().min(1).max(200), reply_to_event_id: z.string().min(1), sender_ephemeral_id: z.union([z.string(), z.number()]).transform(String), created_at_ms: z.number().int().positive() }).safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: 'invalid delivery receipt', details: parsed.error.issues })
+  if (!/^(0|[1-9][0-9]*)$/.test(parsed.data.sender_ephemeral_id)) return res.status(400).json({ error: 'invalid sender ephemeral ID' })
+  const authorityResponse = await store.authorityResponse(String(req.params.responseId))
+  if (!authorityResponse) return res.status(404).json({ error: 'response not found' })
+  if (authorityResponse.event_id !== parsed.data.reply_to_event_id || authorityResponse.destination_ephemeral_id !== parsed.data.sender_ephemeral_id) return res.status(400).json({ error: 'receipt does not match response destination' })
+  const row = await store.recordAuthorityReceipt({ receipt_id: parsed.data.receipt_id, response_id: String(req.params.responseId), reply_to_event_id: parsed.data.reply_to_event_id, sender_ephemeral_id: parsed.data.sender_ephemeral_id, created_at_ms: parsed.data.created_at_ms, received_at_ms: Date.now() })
+  if (!row) return res.status(404).json({ error: 'response not found' })
+  emit('authority-response', publicAuthorityResponse(row))
+  return res.json({ ok: true, response: publicAuthorityResponse(row) })
+})
+
+app.get('/v1/responses/:responseId', bearer, async (req, res) => {
+  const row = await store.authorityResponse(String(req.params.responseId))
+  if (!row) return res.status(404).json({ error: 'response not found' })
+  return res.json(publicAuthorityResponse(row))
+})
 app.get('/v1/sos', bearer, async (_req, res) => res.json(await store.all()))
 app.get('/v1/authorities/nearby', bearer, async (req, res) => {
   const query = z.object({ latitude: z.coerce.number().min(-90).max(90), longitude: z.coerce.number().min(-180).max(180), type: z.enum(['general', 'fire', 'crime', 'kidnap', 'medical', 'natural_disaster']) }).safeParse(req.query)

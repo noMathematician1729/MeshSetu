@@ -278,6 +278,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             MeshBridge.receivedFromJson(receivedJson.cast<Object?, Object?>()),
           );
         }
+      case 'verified_authority_response':
+        setState(() {
+          _status =
+              'MeshSetu\nVerified authority response received\n${data['responseType'] ?? 'update'}\n${data['messageText'] ?? ''}';
+        });
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
       case 'mesh_metric':

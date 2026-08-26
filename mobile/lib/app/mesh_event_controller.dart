@@ -16,11 +16,15 @@ import '../core/ble/mesh_health_watchdog.dart';
 import '../core/ble/mesh_transport.dart';
 import '../core/ble/scan_pacer.dart';
 import '../core/ble/sos_advertisement.dart';
+import '../core/data/database.dart';
+import '../core/data/return_channel_dao.dart';
 import '../core/model/model.dart';
 import '../core/protocol/frame.dart';
 import '../core/protocol/protocol_metrics.dart';
 import '../core/protocol/relay_engine.dart';
 import '../core/protocol/secure_envelope.dart';
+import '../core/protocol/authority_signature.dart';
+import '../core/ble/return_router.dart';
 import 'test_sos_packet.dart';
 
 /// Port of `in.meshsetu.app.MeshEventService`'s mesh-orchestration logic
@@ -79,6 +83,7 @@ class MeshEventController {
 
   MeshEventController({
     this.configuration = MeshSiteConfiguration.demo,
+    this.database,
     this.onPeerState,
     this.onMeshStatus,
     this.onMetrics,
@@ -86,9 +91,13 @@ class MeshEventController {
     this.zoneResolver,
     this.onZoneEstimate,
     this.onCompactSosAlert,
+    this.authorityTrustSnapshot,
+    this.isKnownSosEvent,
+    this.onVerifiedAuthorityResponse,
   });
 
   final MeshSiteConfiguration configuration;
+  final MeshDatabase? database;
   final void Function(List<PeerState> peers)? onPeerState;
   final void Function(String status)? onMeshStatus;
   final void Function(List<RelayMetric> metrics)? onMetrics;
@@ -97,8 +106,13 @@ class MeshEventController {
   final ZoneResolver? zoneResolver;
   final void Function(ZoneEstimate estimate)? onZoneEstimate;
   final void Function(MeshSosAdvertisement alert)? onCompactSosAlert;
+  final Future<AuthorityTrustSnapshot?> Function()? authorityTrustSnapshot;
+  final Future<bool> Function(String eventId)? isKnownSosEvent;
+  final VerifiedResponseListener? onVerifiedAuthorityResponse;
 
   MeshTransportCoordinator? _coordinator;
+  MeshDatabase? _returnDatabase;
+  ReturnRouter? _returnRouter;
   int _localToken = 0;
   int get localEphemeralId => _localToken;
   IOSink? _metricSink;
@@ -160,6 +174,7 @@ class MeshEventController {
     _healthWatchdog = MeshHealthWatchdog();
     final generation = ++_runGeneration;
     MeshTransportCoordinator? coordinator;
+    MeshDatabase? returnDatabase;
     IOSink? metricSink;
     try {
       if (kDebugMode) await UniversalBle.setLogLevel(BleLogLevel.debug);
@@ -175,6 +190,12 @@ class MeshEventController {
       _metricSink = metricSink;
       _jsonMetricSink = JsonLineMetricSink(metricSink);
 
+      final returnDb = database ?? MeshDatabase();
+      returnDatabase = returnDb;
+      _returnDatabase = returnDb;
+      final reverseRoutes = ReverseRouteRepository(returnDb);
+      final authorityResponses = AuthorityResponseRepository(returnDb);
+
       final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
         configuration.siteId,
         SiteKeyProvisioning.demoKey(configuration.siteId),
@@ -185,6 +206,34 @@ class MeshEventController {
         store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
         clockMs: () => DateTime.now().millisecondsSinceEpoch,
       );
+      relay.addValidSosListener((envelope, peerId) async {
+        final activeCoordinator = coordinator;
+        final peer = activeCoordinator?.peerDirectory.entryForPeer(peerId);
+        if (peer == null) {
+          _reportMetrics([
+            RelayMetric(
+              'reverse_route_miss',
+              objectId: envelope.objectId,
+              peerId: peerId,
+              detail: 'hello_ephemeral_id_unavailable',
+            ),
+          ]);
+          return;
+        }
+        await reverseRoutes.observeValidSos(
+          envelope: envelope,
+          previousPeerEphemeralId: peer.ephemeralNodeId,
+          previousPeerHint: peerId,
+        );
+        _reportMetrics([
+          RelayMetric(
+            'reverse_route_learned',
+            objectId: envelope.objectId,
+            value: peer.ephemeralNodeId,
+            detail: 'candidate_count_bounded',
+          ),
+        ]);
+      });
       final server = MeshGattServer(
         onDiagnostic: (kind, peerId, {detail, value}) {
           _reportMetrics([
@@ -204,10 +253,35 @@ class MeshEventController {
         localHello: hello,
         onMetrics: _reportMetrics,
       );
-      await coordinator.start();
+      final activeCoordinator = coordinator;
+      final returnRouter = ReturnRouter(
+        transport: activeCoordinator,
+        routes: reverseRoutes,
+        responses: authorityResponses,
+        localEphemeralId: _localToken,
+        trustSnapshot: authorityTrustSnapshot ?? () async => null,
+        isKnownSosEvent: isKnownSosEvent ?? (_) async => false,
+        onVerifiedResponse: onVerifiedAuthorityResponse,
+        onMetric: (kind, {detail, value}) {
+          _reportMetrics([RelayMetric(kind, detail: detail, value: value)]);
+        },
+      );
+      _returnRouter = returnRouter;
+      relay.addResponderUpdateListener((envelope, peerId, encryptedBytes) {
+        scheduleMicrotask(() {
+          unawaited(
+            returnRouter.handleResponderUpdate(
+              envelope: envelope,
+              fromPeerId: peerId,
+              encryptedBytes: encryptedBytes,
+            ),
+          );
+        });
+      });
+      await activeCoordinator.start();
       if (_stopRequested) throw StateError('mesh start cancelled');
-      _coordinator = coordinator;
-      _peerStateSubscription = coordinator.peerState.listen((peers) {
+      _coordinator = activeCoordinator;
+      _peerStateSubscription = activeCoordinator.peerState.listen((peers) {
         onPeerState?.call(peers);
       });
 
@@ -243,7 +317,7 @@ class MeshEventController {
 
       _looping = true;
       _scanCancel = Completer<void>();
-      _scanFuture = _scanLoop(siteFingerprint, coordinator, generation);
+      _scanFuture = _scanLoop(siteFingerprint, activeCoordinator, generation);
       unawaited(_scanFuture!);
       onMeshStatus?.call(advertisingActive ? 'advertising' : 'scan_only');
     } catch (_) {
@@ -260,6 +334,9 @@ class MeshEventController {
       _peerStateSubscription = null;
       _coordinator = null;
       await coordinator?.stop();
+      await returnDatabase?.close();
+      _returnDatabase = null;
+      _returnRouter = null;
       try {
         await MeshAdvertiser.stop();
       } catch (_) {
@@ -462,6 +539,7 @@ class MeshEventController {
       if (!_looping) return;
       try {
         await coordinator.tick();
+        await _returnRouter?.retryDue();
       } catch (_) {
         // A transient peer failure must not terminate the long-running scan.
       }
@@ -851,6 +929,9 @@ class MeshEventController {
     _discoveryMetadata = null;
     final coordinator = _coordinator;
     _coordinator = null;
+    final returnDatabase = _returnDatabase;
+    _returnDatabase = null;
+    _returnRouter = null;
     final metricSink = _metricSink;
     _metricSink = null;
     try {
@@ -867,6 +948,7 @@ class MeshEventController {
       _peerStateSubscription = null;
       await coordinator?.stop();
     } finally {
+      await returnDatabase?.close();
       await metricSink?.close();
       _jsonMetricSink = null;
       onMeshStatus?.call('stopped');
