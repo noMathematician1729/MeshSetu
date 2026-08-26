@@ -13,7 +13,6 @@ import '../../ui/theme/mesh_tokens.dart';
 import '../join/manifest.dart';
 import 'room_chat_screen.dart';
 import 'room_presence.dart';
-import 'room_presence_beacon.dart';
 import 'room_presence_socket.dart';
 
 /// Module-level so re-opening the same room lobby within one app session
@@ -23,10 +22,10 @@ import 'room_presence_socket.dart';
 /// announcement is wanted again.
 final Set<String> _announcedRoomMembers = {};
 
-/// Presence re-announce cadence while a lobby is open. This is short on
-/// purpose: the point is not TTL refresh (presence rows live 24h) but being
-/// heard by a peer that connects after this device joined.
-const _reannounceInterval = Duration(seconds: 60);
+/// Presence announcements use the same `RoomPresenceCodec` 24h TTL as the
+/// mesh outbox row; re-announcing well inside that window keeps a lobby's
+/// mesh-observed member list from expiring while the room stays open.
+const _reannounceInterval = Duration(minutes: 5);
 
 class RoomLobbyScreen extends ConsumerStatefulWidget {
   const RoomLobbyScreen({
@@ -48,7 +47,7 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
   List<RoomMember> _meshMembers = const [];
   List<RoomMember> _liveMembers = const [];
   var _receivedLiveSnapshot = false;
-  RoomPresenceBeacon? _presenceBeacon;
+  Timer? _reannounceTimer;
   var _startingEventMode = false;
 
   @override
@@ -60,64 +59,19 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
         .listen((members) {
           if (mounted) setState(() => _meshMembers = members);
         });
-    unawaited(_connectLivePresence());
-    // Opening a room is the intent to participate in it. Without the radio up
-    // the presence announcement below never leaves the outbox, so nobody in
-    // the room can see anybody else offline.
-    unawaited(_ensureMeshAndStartPresence());
-  }
-
-  Future<void> _ensureMeshAndStartPresence() async {
-    try {
-      await _ensureMeshForRoom();
-    } catch (_) {
-      // The status banner remains the source of truth for startup failures;
-      // presence can still be queued and retried if the radio recovers.
-    }
-    if (!mounted) return;
-    _presenceBeacon = RoomPresenceBeacon(
-      announce: () => _announcePresence(force: true),
-      interval: _reannounceInterval,
-      peerCounts: _peerCountStream(),
-    )..start();
-  }
-
-  /// Peer counts drive an immediate re-announce the moment a phone links up,
-  /// which is when a presence packet can finally be delivered.
-  Stream<int> _peerCountStream() =>
-      ref
-          .read(meshBridgeClientProvider)
-          ?.meshStatusStream
-          .map((status) => status.peerCount) ??
-      const Stream<int>.empty();
-
-  /// Starts Event Mode for this room's site if it is not already running.
-  /// Idempotent: [RoomMeshBootstrap] reports `alreadyRunning` and simply
-  /// re-attaches the outbox bridge in that case.
-  Future<void> _ensureMeshForRoom() async {
-    final status = ref.read(meshBridgeClientProvider)?.meshStatus;
-    if (status?.eventModeRunning == true) return;
-    await _startEventModeFromRoom();
-  }
-
-  Future<void> _showEventCodeDialog(String eventCode) async {
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Compare event codes'),
-        content: Text(
-          'This phone is on event code:\n\n$eventCode\n\n'
-          'Ask the other phone to scan this room invite QR or enter this code. '
-          'MeshSetu will not connect devices from different events.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
+    // Presence announcements below are written to the durable outbox, so the
+    // outbox must be bound to this site before they can leave the device.
+    unawaited(
+      RoomMeshBootstrap.attachForSite(
+        ref: ref,
+        siteId: widget.manifest.siteId,
       ),
+    );
+    unawaited(_connectLivePresence());
+    unawaited(_announcePresence());
+    _reannounceTimer = Timer.periodic(
+      _reannounceInterval,
+      (_) => unawaited(_announcePresence(force: true)),
     );
   }
 
@@ -193,7 +147,7 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
   void dispose() {
     unawaited(_meshMembersSubscription?.cancel());
     unawaited(_presenceSocket?.dispose());
-    unawaited(_presenceBeacon?.dispose());
+    _reannounceTimer?.cancel();
     super.dispose();
   }
 
@@ -223,9 +177,6 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
               status: status,
               starting: _startingEventMode,
               onStartEventMode: _startEventModeFromRoom,
-              eventCode: widget.manifest.meshCode,
-              onResolveMismatch: () =>
-                  _showEventCodeDialog(widget.manifest.meshCode),
             ),
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
@@ -277,23 +228,6 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
                 ? null
                 : '${members.length} member${members.length == 1 ? '' : 's'}',
           ),
-          // Connected to phones but still alone in the room almost always
-          // means the other device is in a different room: membership and
-          // messages are both filtered by exact room code. Say so, and show
-          // the code to compare, instead of leaving an empty list.
-          if (meshStatus.valueOrNull case final status?)
-            if (status.peerCount > 0 && members.length <= 1)
-              Padding(
-                padding: const EdgeInsets.only(bottom: MeshSpace.sm),
-                child: MeshStatusPill(
-                  label:
-                      '${status.peerCount} device'
-                      '${status.peerCount == 1 ? '' : 's'} linked · compare the '
-                      'room code below if nobody appears',
-                  icon: Icons.info_outline,
-                  tone: MeshStatusTone.neutral,
-                ),
-              ),
           members.isEmpty
               ? const MeshEmptyState(
                   icon: Icons.person_outline,
@@ -326,14 +260,12 @@ class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
                               ),
                             ),
                             MeshStatusPill(
-                              label:
-                                  _liveMembers.any(
+                              label: _liveMembers.any(
                                     (m) => m.memberId == member.memberId,
                                   )
                                   ? 'Active now'
                                   : 'Seen over mesh',
-                              tone:
-                                  _liveMembers.any(
+                              tone: _liveMembers.any(
                                     (m) => m.memberId == member.memberId,
                                   )
                                   ? MeshStatusTone.active
@@ -361,15 +293,11 @@ class _MeshStatusBanner extends StatelessWidget {
     required this.status,
     required this.starting,
     required this.onStartEventMode,
-    required this.eventCode,
-    required this.onResolveMismatch,
   });
 
   final MeshStatus status;
   final bool starting;
   final VoidCallback onStartEventMode;
-  final String eventCode;
-  final VoidCallback onResolveMismatch;
 
   @override
   Widget build(BuildContext context) {
@@ -457,23 +385,11 @@ class _MeshStatusBanner extends StatelessWidget {
                 Icon(Icons.warning_amber, size: 18, color: palette.caution),
                 const SizedBox(width: MeshSpace.sm),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Different event detected',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      Text(
-                        'Nearby device is not on this event. Your code: $eventCode',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                      TextButton.icon(
-                        onPressed: onResolveMismatch,
-                        icon: const Icon(Icons.qr_code_2, size: 18),
-                        label: const Text('Show code / invite'),
-                      ),
-                    ],
+                  child: Text(
+                    'A nearby device is using a different event/site code. '
+                    'It will not appear here or connect until it joins '
+                    'this event.',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
               ],

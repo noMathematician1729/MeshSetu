@@ -57,6 +57,9 @@ void main() {
 
     await tester.pumpWidget(_app());
     await tester.pump();
+    // MeshSetuApp resolves its localizationsDelegates before the root
+    // navigator mounts, so the flush lands a frame later than a warm start.
+    await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(SosIncidentScreen), findsOneWidget);

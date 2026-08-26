@@ -88,22 +88,6 @@ class UniversalBlePeripheral {
 
   static Future<void> stopAdvertising() => _platform.stopAdvertising();
 
-  /// Starts a non-connectable Android extended advertising set while leaving
-  /// the legacy advertiser untouched. Unsupported platforms throw and callers
-  /// must keep the legacy advertisement as their fallback.
-  static Future<void> startExtendedAdvertising({
-    required List<String> services,
-    ManufacturerData? manufacturerData,
-    PeripheralPlatformConfig? platformConfig,
-  }) => _platform.startExtendedAdvertising(
-    services: services.map(BleUuidParser.string).toList(),
-    manufacturerData: manufacturerData,
-    platformConfig: platformConfig,
-  );
-
-  static Future<void> stopExtendedAdvertising() =>
-      _platform.stopExtendedAdvertising();
-
   static Future<void> updateCharacteristicValue({
     required String characteristicId,
     required Uint8List value,

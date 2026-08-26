@@ -6,11 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/emergency_gestures.dart';
 import '../../app/providers.dart';
 import '../../ui/components/mesh_components.dart';
+import '../../ui/localization/mesh_localizations.dart';
 import '../../ui/theme/mesh_tokens.dart';
 import '../../ui/theme/theme_controller.dart';
 import '../gateway/gateway_screen.dart';
 import 'gesture_mappings_screen.dart';
 import '../location/location_screen.dart';
+import '../stt/stt_engine.dart';
 
 /// Fix for a pre-existing rendering issue (flagged in Task 3): the previous
 /// version of this screen placed `ListTile`/`SwitchListTile` rows directly
@@ -27,6 +29,10 @@ class SettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final fontScale = ref.watch(fontScaleProvider);
     final timeout = ref.watch(sosTimeoutProvider);
+    final profile = ref.watch(onboardingProfileProvider).valueOrNull;
+    final language =
+        SttLanguage.fromDisplayName(profile?.language ?? '') ??
+        SttLanguage.english;
     return MeshPage(
       title: 'Settings',
       child: Column(
@@ -40,7 +46,7 @@ class SettingsScreen extends ConsumerWidget {
                 _SettingRow(
                   icon: Icons.language_outlined,
                   title: 'Language',
-                  trailing: const Text('English'),
+                  trailing: Text(context.meshL10n.languageName(language.code)),
                 ),
                 const Divider(height: MeshSpace.sm),
                 Text(
@@ -143,11 +149,13 @@ class SettingsScreen extends ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Emergency gateway',
+                        context.meshL10n.text('Emergency gateway'),
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       Text(
-                        'Configure control-room forwarding',
+                        context.meshL10n.text(
+                          'Configure control-room forwarding',
+                        ),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -191,7 +199,10 @@ class _SettingRow extends StatelessWidget {
         Icon(icon, color: MeshPalette.of(context).textMuted),
         const SizedBox(width: MeshSpace.md),
         Expanded(
-          child: Text(title, style: Theme.of(context).textTheme.titleMedium),
+          child: Text(
+            context.meshL10n.text(title),
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
         ),
         trailing,
       ],
@@ -220,7 +231,10 @@ class _SwitchRow extends StatelessWidget {
         Icon(icon, color: MeshPalette.of(context).textMuted),
         const SizedBox(width: MeshSpace.md),
         Expanded(
-          child: Text(title, style: Theme.of(context).textTheme.titleMedium),
+          child: Text(
+            context.meshL10n.text(title),
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
         ),
         Switch(value: value, onChanged: onChanged),
       ],
@@ -255,8 +269,14 @@ class _NavRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: Theme.of(context).textTheme.titleMedium),
-                Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  context.meshL10n.text(title),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                Text(
+                  context.meshL10n.text(subtitle),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ],
             ),
           ),

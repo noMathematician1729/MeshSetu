@@ -300,7 +300,6 @@ class MeshTransportCoordinator implements MeshTransport {
     PeerLink link, {
     required int siteFingerprint,
     int? rssi,
-    int? txPowerAtOneMeter,
   }) {
     if (_stopped) {
       unawaited(link.close());
@@ -328,7 +327,6 @@ class MeshTransportCoordinator implements MeshTransport {
         connected: true,
         mtu: link.mtu,
         rssi: rssi,
-        txPowerAtOneMeter: txPowerAtOneMeter,
         queuedObjects: relay.scheduler.size(),
         lastSeenMs: DateTime.now().millisecondsSinceEpoch,
       ),
@@ -740,7 +738,6 @@ class MeshTransportCoordinator implements MeshTransport {
       connected: peer.connected,
       mtu: peer.mtu,
       rssi: peer.rssi,
-      txPowerAtOneMeter: peer.txPowerAtOneMeter,
       queuedObjects: relay.scheduler.size(),
       lastSeenMs: DateTime.now().millisecondsSinceEpoch,
     );
@@ -845,8 +842,16 @@ class MeshTransportCoordinator implements MeshTransport {
     final hello = localHello;
     final sameSite =
         hello == null || remote.siteFingerprint == hello.siteFingerprint;
-    if (sameSite) _helloVerifiedPeers.add(peerId);
-    return sameSite;
+    // Site scoping is no longer a link-admission gate. A cross-site HELLO used
+    // to close the connection, which presented to the user as a mesh that
+    // never found a peer even with two phones touching. Site separation is
+    // still enforced at the envelope layer, where the AEAD site key makes a
+    // wrong-site payload fail authentication instead of failing silently.
+    _helloVerifiedPeers.add(peerId);
+    if (!sameSite) {
+      _onMetrics([RelayMetric('peer_unverified_site', peerId: peerId)]);
+    }
+    return true;
   }
 
   /// Log-only enforcement (Bible audit Task 5): a peer that has never sent a

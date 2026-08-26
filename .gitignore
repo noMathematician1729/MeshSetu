@@ -16,7 +16,19 @@ mobile/**/.gradle/
 mobile/android/.kotlin/
 mobile/android/local.properties
 
+# Xcode / iOS generated build artifacts (machine-local absolute paths)
+mobile/ios/Flutter/Generated.xcconfig
+mobile/ios/Flutter/flutter_export_environment.sh
+mobile/ios/Flutter/ephemeral/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+**/xcuserdata/
+**/*.xcuserstate
+**/.swiftpm/
+
 # Node
 node_modules/
 dist/
-Ceal
+
+# Large model assets (fetched out of band)
+mobile/assets/models/sherpa-onnx-whisper-base/

@@ -23,6 +23,10 @@ void main() {
       ),
     );
 
+    // MeshSetuApp installs asynchronous localizationsDelegates, so the first
+    // frame renders before MeshLocalizations resolves and the shell mounts.
+    await tester.pump();
+
     expect(find.text('Emergency Aid'), findsOneWidget);
     expect(find.text('SOS'), findsOneWidget);
 

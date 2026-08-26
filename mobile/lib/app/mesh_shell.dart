@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../feature/activity/activity_screen.dart';
 import '../feature/profile/profile_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
+import '../ui/localization/mesh_localizations.dart';
 import '../ui/theme/mesh_tokens.dart';
 import 'event_mode_screen.dart';
 
@@ -34,28 +35,29 @@ class _MeshShellState extends State<MeshShell> {
     for (final tab in _MeshTab.values) tab: GlobalKey<NavigatorState>(),
   };
 
-  static const _tabs = <_MeshTab, ({String label, IconData icon, IconData activeIcon})>{
-    _MeshTab.home: (
-      label: 'Home',
-      icon: Icons.shield_outlined,
-      activeIcon: Icons.shield,
-    ),
-    _MeshTab.rooms: (
-      label: 'Rooms',
-      icon: Icons.forum_outlined,
-      activeIcon: Icons.forum,
-    ),
-    _MeshTab.activity: (
-      label: 'Activity',
-      icon: Icons.pending_actions_outlined,
-      activeIcon: Icons.pending_actions,
-    ),
-    _MeshTab.you: (
-      label: 'You',
-      icon: Icons.person_outline,
-      activeIcon: Icons.person,
-    ),
-  };
+  static const _tabs =
+      <_MeshTab, ({String label, IconData icon, IconData activeIcon})>{
+        _MeshTab.home: (
+          label: 'Home',
+          icon: Icons.shield_outlined,
+          activeIcon: Icons.shield,
+        ),
+        _MeshTab.rooms: (
+          label: 'Rooms',
+          icon: Icons.forum_outlined,
+          activeIcon: Icons.forum,
+        ),
+        _MeshTab.activity: (
+          label: 'Activity',
+          icon: Icons.pending_actions_outlined,
+          activeIcon: Icons.pending_actions,
+        ),
+        _MeshTab.you: (
+          label: 'You',
+          icon: Icons.person_outline,
+          activeIcon: Icons.person,
+        ),
+      };
 
   Widget _rootFor(_MeshTab tab) => switch (tab) {
     _MeshTab.home => const EventModeScreen(),
@@ -112,8 +114,11 @@ class _MeshShellState extends State<MeshShell> {
             for (final entry in _tabs.entries)
               NavigationDestination(
                 icon: Icon(entry.value.icon),
-                selectedIcon: Icon(entry.value.activeIcon, color: palette.primary),
-                label: entry.value.label,
+                selectedIcon: Icon(
+                  entry.value.activeIcon,
+                  color: palette.primary,
+                ),
+                label: context.meshL10n.text(entry.value.label),
               ),
           ],
         ),

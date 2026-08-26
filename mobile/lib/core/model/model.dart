@@ -28,6 +28,12 @@ enum PayloadType {
   ack,
   responderUpdate,
   beaconObservation,
+
+  /// Push-to-talk voice note authored inside a Room. Deliberately separate
+  /// from [voiceObject]: that type is SOS evidence and is auto-forwarded to
+  /// the control room by `app/mesh_bridge_client.dart`, whereas a room voice
+  /// note must stay inside the room's membership.
+  roomVoice,
 }
 
 enum InputMode { tap, text, voice }
@@ -141,7 +147,6 @@ class PeerState {
     required this.connected,
     required this.mtu,
     required this.rssi,
-    this.txPowerAtOneMeter,
     required this.queuedObjects,
     required this.lastSeenMs,
   });
@@ -151,7 +156,6 @@ class PeerState {
   final bool connected;
   final int mtu;
   final int? rssi;
-  final int? txPowerAtOneMeter;
   final int queuedObjects;
   final int lastSeenMs;
 }

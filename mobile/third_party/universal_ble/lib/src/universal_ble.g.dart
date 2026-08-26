@@ -274,7 +274,6 @@ class UniversalBleScanResult {
     this.serviceData,
     this.services,
     this.timestamp,
-    this.txPower,
   });
 
   String deviceId;
@@ -293,9 +292,6 @@ class UniversalBleScanResult {
 
   int? timestamp;
 
-  /// TX power from the Bluetooth AD TX Power Level field, in dBm.
-  int? txPower;
-
   List<Object?> _toList() {
     return <Object?>[
       deviceId,
@@ -306,7 +302,6 @@ class UniversalBleScanResult {
       serviceData,
       services,
       timestamp,
-      txPower,
     ];
   }
 
@@ -327,7 +322,6 @@ class UniversalBleScanResult {
           ?.cast<String, Uint8List>(),
       services: (result[6] as List<Object?>?)?.cast<String>(),
       timestamp: result[7] as int?,
-      txPower: result.length > 8 ? result[8] as int? : null,
     );
   }
 
@@ -347,8 +341,7 @@ class UniversalBleScanResult {
         _deepEquals(manufacturerDataList, other.manufacturerDataList) &&
         _deepEquals(serviceData, other.serviceData) &&
         _deepEquals(services, other.services) &&
-        _deepEquals(timestamp, other.timestamp) &&
-        _deepEquals(txPower, other.txPower);
+        _deepEquals(timestamp, other.timestamp);
   }
 
   @override
@@ -954,7 +947,6 @@ class PeripheralAndroidOptions {
   PeripheralAndroidOptions({
     this.addManufacturerDataInScanResponse,
     this.addServicesInScanResponse,
-    this.includeTxPowerLevel,
   });
 
   bool? addManufacturerDataInScanResponse;
@@ -967,15 +959,10 @@ class PeripheralAndroidOptions {
   /// the combined data fits within the scan response's 31-byte limit.
   bool? addServicesInScanResponse;
 
-  /// Include the Bluetooth AD TX Power Level field when the selected packet
-  /// budget permits it. Null preserves the platform default.
-  bool? includeTxPowerLevel;
-
   List<Object?> _toList() {
     return <Object?>[
       addManufacturerDataInScanResponse,
       addServicesInScanResponse,
-      includeTxPowerLevel,
     ];
   }
 
@@ -988,7 +975,6 @@ class PeripheralAndroidOptions {
     return PeripheralAndroidOptions(
       addManufacturerDataInScanResponse: result[0] as bool?,
       addServicesInScanResponse: result[1] as bool?,
-      includeTxPowerLevel: result.length > 2 ? result[2] as bool? : null,
     );
   }
 
@@ -1006,11 +992,7 @@ class PeripheralAndroidOptions {
           addManufacturerDataInScanResponse,
           other.addManufacturerDataInScanResponse,
         ) &&
-        _deepEquals(
-          addServicesInScanResponse,
-          other.addServicesInScanResponse,
-        ) &&
-        _deepEquals(includeTxPowerLevel, other.includeTxPowerLevel);
+        _deepEquals(addServicesInScanResponse, other.addServicesInScanResponse);
   }
 
   @override
@@ -2279,66 +2261,6 @@ class UniversalBlePeripheralChannel {
       isNullValid: false,
     );
     return pigeonVar_replyValue! as PeripheralReadinessState;
-  }
-
-  /// Raw append-only capability tuple. Kept unmodeled so older custom hosts
-  /// can still return a shorter list without breaking the Dart codec.
-  Future<List<Object?>> getCapabilities() async {
-    final pigeonVar_channelName =
-        'dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.getCapabilities$pigeonVar_messageChannelSuffix';
-    final pigeonVar_channel = BasicMessageChannel<Object?>(
-      pigeonVar_channelName,
-      pigeonChannelCodec,
-      binaryMessenger: pigeonVar_binaryMessenger,
-    );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
-    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
-    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
-      pigeonVar_replyList,
-      pigeonVar_channelName,
-      isNullValid: false,
-    );
-    return (pigeonVar_replyValue! as List<Object?>);
-  }
-
-  Future<void> startExtendedAdvertising(
-    List<String> services,
-    UniversalManufacturerData? manufacturerData,
-    PeripheralPlatformConfig? platformConfig,
-  ) async {
-    final pigeonVar_channelName =
-        'dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.startExtendedAdvertising$pigeonVar_messageChannelSuffix';
-    final pigeonVar_channel = BasicMessageChannel<Object?>(
-      pigeonVar_channelName,
-      pigeonChannelCodec,
-      binaryMessenger: pigeonVar_binaryMessenger,
-    );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
-      <Object?>[services, manufacturerData, platformConfig],
-    );
-    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
-    _extractReplyValueOrThrow(
-      pigeonVar_replyList,
-      pigeonVar_channelName,
-      isNullValid: true,
-    );
-  }
-
-  Future<void> stopExtendedAdvertising() async {
-    final pigeonVar_channelName =
-        'dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.stopExtendedAdvertising$pigeonVar_messageChannelSuffix';
-    final pigeonVar_channel = BasicMessageChannel<Object?>(
-      pigeonVar_channelName,
-      pigeonChannelCodec,
-      binaryMessenger: pigeonVar_binaryMessenger,
-    );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
-    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
-    _extractReplyValueOrThrow(
-      pigeonVar_replyList,
-      pigeonVar_channelName,
-      isNullValid: true,
-    );
   }
 
   Future<void> stopAdvertising() async {

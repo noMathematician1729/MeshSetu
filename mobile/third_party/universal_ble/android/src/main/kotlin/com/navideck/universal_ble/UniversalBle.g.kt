@@ -489,8 +489,7 @@ data class UniversalBleScanResult (
   val manufacturerDataList: List<UniversalManufacturerData>? = null,
   val serviceData: Map<String, ByteArray>? = null,
   val services: List<String>? = null,
-  val timestamp: Long? = null,
-  val txPower: Long? = null
+  val timestamp: Long? = null
 )
  {
   companion object {
@@ -503,8 +502,7 @@ data class UniversalBleScanResult (
       val serviceData = pigeonVar_list[5] as Map<String, ByteArray>?
       val services = pigeonVar_list[6] as List<String>?
       val timestamp = pigeonVar_list[7] as Long?
-      val txPower = if (pigeonVar_list.size > 8) pigeonVar_list[8] as Long? else null
-      return UniversalBleScanResult(deviceId, name, isPaired, rssi, manufacturerDataList, serviceData, services, timestamp, txPower)
+      return UniversalBleScanResult(deviceId, name, isPaired, rssi, manufacturerDataList, serviceData, services, timestamp)
     }
   }
   fun toList(): List<Any?> {
@@ -517,7 +515,6 @@ data class UniversalBleScanResult (
       serviceData,
       services,
       timestamp,
-      txPower,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -528,7 +525,7 @@ data class UniversalBleScanResult (
       return true
     }
     val other = other as UniversalBleScanResult
-    return UniversalBlePigeonUtils.deepEquals(this.deviceId, other.deviceId) && UniversalBlePigeonUtils.deepEquals(this.name, other.name) && UniversalBlePigeonUtils.deepEquals(this.isPaired, other.isPaired) && UniversalBlePigeonUtils.deepEquals(this.rssi, other.rssi) && UniversalBlePigeonUtils.deepEquals(this.manufacturerDataList, other.manufacturerDataList) && UniversalBlePigeonUtils.deepEquals(this.serviceData, other.serviceData) && UniversalBlePigeonUtils.deepEquals(this.services, other.services) && UniversalBlePigeonUtils.deepEquals(this.timestamp, other.timestamp) && UniversalBlePigeonUtils.deepEquals(this.txPower, other.txPower)
+    return UniversalBlePigeonUtils.deepEquals(this.deviceId, other.deviceId) && UniversalBlePigeonUtils.deepEquals(this.name, other.name) && UniversalBlePigeonUtils.deepEquals(this.isPaired, other.isPaired) && UniversalBlePigeonUtils.deepEquals(this.rssi, other.rssi) && UniversalBlePigeonUtils.deepEquals(this.manufacturerDataList, other.manufacturerDataList) && UniversalBlePigeonUtils.deepEquals(this.serviceData, other.serviceData) && UniversalBlePigeonUtils.deepEquals(this.services, other.services) && UniversalBlePigeonUtils.deepEquals(this.timestamp, other.timestamp)
   }
 
   override fun hashCode(): Int {
@@ -541,7 +538,6 @@ data class UniversalBleScanResult (
     result = 31 * result + UniversalBlePigeonUtils.deepHash(this.serviceData)
     result = 31 * result + UniversalBlePigeonUtils.deepHash(this.services)
     result = 31 * result + UniversalBlePigeonUtils.deepHash(this.timestamp)
-    result = 31 * result + UniversalBlePigeonUtils.deepHash(this.txPower)
     return result
   }
 }
@@ -1087,24 +1083,20 @@ data class PeripheralAndroidOptions (
    * Note: If this is enabled with `addManufacturerDataInScanResponse`, ensure
    * the combined data fits within the scan response's 31-byte limit.
    */
-  val addServicesInScanResponse: Boolean? = null,
-  /** Include the Bluetooth AD TX Power Level field when requested by Dart. */
-  val includeTxPowerLevel: Boolean? = null
+  val addServicesInScanResponse: Boolean? = null
 )
  {
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): PeripheralAndroidOptions {
       val addManufacturerDataInScanResponse = pigeonVar_list[0] as Boolean?
       val addServicesInScanResponse = pigeonVar_list[1] as Boolean?
-      val includeTxPowerLevel = if (pigeonVar_list.size > 2) pigeonVar_list[2] as Boolean? else null
-      return PeripheralAndroidOptions(addManufacturerDataInScanResponse, addServicesInScanResponse, includeTxPowerLevel)
+      return PeripheralAndroidOptions(addManufacturerDataInScanResponse, addServicesInScanResponse)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
       addManufacturerDataInScanResponse,
       addServicesInScanResponse,
-      includeTxPowerLevel,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -1115,14 +1107,13 @@ data class PeripheralAndroidOptions (
       return true
     }
     val other = other as PeripheralAndroidOptions
-    return UniversalBlePigeonUtils.deepEquals(this.addManufacturerDataInScanResponse, other.addManufacturerDataInScanResponse) && UniversalBlePigeonUtils.deepEquals(this.addServicesInScanResponse, other.addServicesInScanResponse) && UniversalBlePigeonUtils.deepEquals(this.includeTxPowerLevel, other.includeTxPowerLevel)
+    return UniversalBlePigeonUtils.deepEquals(this.addManufacturerDataInScanResponse, other.addManufacturerDataInScanResponse) && UniversalBlePigeonUtils.deepEquals(this.addServicesInScanResponse, other.addServicesInScanResponse)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
     result = 31 * result + UniversalBlePigeonUtils.deepHash(this.addManufacturerDataInScanResponse)
     result = 31 * result + UniversalBlePigeonUtils.deepHash(this.addServicesInScanResponse)
-    result = 31 * result + UniversalBlePigeonUtils.deepHash(this.includeTxPowerLevel)
     return result
   }
 }
@@ -2309,10 +2300,7 @@ class UniversalBleCallbackChannel(private val binaryMessenger: BinaryMessenger, 
 interface UniversalBlePeripheralChannel {
   fun getAdvertisingState(): PeripheralAdvertisingState
   fun getReadinessState(): PeripheralReadinessState
-  fun getCapabilities(): List<Any?>
   fun stopAdvertising()
-  fun startExtendedAdvertising(services: List<String>, manufacturerData: UniversalManufacturerData?, platformConfig: PeripheralPlatformConfig?, callback: (Result<Unit>) -> Unit)
-  fun stopExtendedAdvertising()
   fun addService(service: PeripheralService)
   fun removeService(serviceId: String)
   fun clearServices()
@@ -2352,48 +2340,11 @@ interface UniversalBlePeripheralChannel {
         }
       }
       run {
-        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.getCapabilities$separatedMessageChannelSuffix", codec)
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.getReadinessState$separatedMessageChannelSuffix", codec)
         if (api != null) {
           channel.setMessageHandler { _, reply ->
             val wrapped: List<Any?> = try {
-              listOf(api.getCapabilities())
-            } catch (exception: Throwable) {
-              UniversalBlePigeonUtils.wrapError(exception)
-            }
-            reply.reply(wrapped)
-          }
-        } else {
-          channel.setMessageHandler(null)
-        }
-      }
-      run {
-        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.startExtendedAdvertising$separatedMessageChannelSuffix", codec)
-        if (api != null) {
-          channel.setMessageHandler { message, reply ->
-            val args = message as List<Any?>
-            val servicesArg = args[0] as List<String>
-            val manufacturerDataArg = args[1] as UniversalManufacturerData?
-            val platformConfigArg = args[2] as PeripheralPlatformConfig?
-            api.startExtendedAdvertising(servicesArg, manufacturerDataArg, platformConfigArg) { result: Result<Unit> ->
-              val error = result.exceptionOrNull()
-              if (error != null) {
-                reply.reply(UniversalBlePigeonUtils.wrapError(error))
-              } else {
-                reply.reply(UniversalBlePigeonUtils.wrapResult(null))
-              }
-            }
-          }
-        } else {
-          channel.setMessageHandler(null)
-        }
-      }
-      run {
-        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralChannel.stopExtendedAdvertising$separatedMessageChannelSuffix", codec)
-        if (api != null) {
-          channel.setMessageHandler { _, reply ->
-            val wrapped: List<Any?> = try {
-              api.stopExtendedAdvertising()
-              listOf(null)
+              listOf(api.getReadinessState())
             } catch (exception: Throwable) {
               UniversalBlePigeonUtils.wrapError(exception)
             }

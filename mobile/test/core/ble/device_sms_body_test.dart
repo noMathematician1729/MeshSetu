@@ -2,7 +2,7 @@ import 'package:meshsetu_mobile/core/ble/device_sms_service.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('relay alert matches the required emergency SMS format', () {
+  test('resolved relay alert matches the required CEAL SMS format', () {
     final body = DeviceSmsService.buildRelayAlertBody(
       victimName: 'Vedant',
       victimPhone: '+919004481876',
@@ -17,7 +17,7 @@ void main() {
     );
 
     expect(body, '''
-EMERGENCY SOS — Meshsetu
+EMERGENCY SOS — CEAL
 Victim: Vedant
 Phone: +919004481876
 Blood group: AB+
@@ -29,10 +29,29 @@ Time: 2026-02-28T23:20:21.973Z
 ID: uid:d7c804a96f05:1''');
   });
 
-  test('missing medical and identity fields fall back, never blank', () {
+  test('the detailed alert is never truncated to one SMS segment', () {
+    final body = DeviceSmsService.buildRelayAlertBody(
+      victimName: 'Vedant',
+      victimPhone: '+919004481876',
+      bloodGroup: 'AB+',
+      allergies: 'none',
+      conditions: 'none',
+      relayLatitude: 19.0729872,
+      relayLongitude: 72.8998389,
+      reporterUid: 'd7c804a96f05',
+      sequence: 1,
+    );
+
+    // Android splits long bodies with divideMessage; cutting at 160 here would
+    // destroy the map link and the incident ID.
+    expect(body.length, greaterThan(160));
+    expect(body, endsWith('ID: uid:d7c804a96f05:1'));
+  });
+
+  test('missing identity and medical fields fall back, never blank', () {
     final body = DeviceSmsService.buildRelayAlertBody(
       victimName: '',
-      victimPhone: '  ',
+      victimPhone: '   ',
       bloodGroup: null,
       allergies: '',
       conditions: null,
@@ -51,7 +70,7 @@ ID: uid:d7c804a96f05:1''');
     expect(body, contains('ID: uid:abc123abc123:9'));
   });
 
-  test('a denied GPS still sends medical details without a map link', () {
+  test('a denied GPS still sends medical detail without a map link', () {
     final body = DeviceSmsService.buildRelayAlertBody(
       victimName: 'Asha',
       victimPhone: '+911234567890',
@@ -70,22 +89,18 @@ ID: uid:d7c804a96f05:1''');
     expect(body, contains('Time: 2026-03-01T10:30:00.000Z'));
   });
 
-  test('the alert is not truncated to one SMS segment', () {
-    final body = DeviceSmsService.buildRelayAlertBody(
-      victimName: 'Vedant',
-      victimPhone: '+919004481876',
-      bloodGroup: 'AB+',
-      allergies: 'none',
-      conditions: 'none',
-      relayLatitude: 19.0729872,
-      relayLongitude: 72.8998389,
-      reporterUid: 'd7c804a96f05',
-      sequence: 1,
+  test('the existing compact fallback body is left unchanged', () {
+    // The offline path must keep working exactly as it does today.
+    final body = DeviceSmsService.buildBody(
+      reporterName: 'Unknown — nearby SOS',
+      emergencyType: 'general',
     );
 
-    // The old builder cut the body at 160 characters, which destroyed the
-    // map link and the incident ID. Android splits long bodies instead.
-    expect(body.length, greaterThan(160));
-    expect(body, endsWith('ID: uid:d7c804a96f05:1'));
+    expect(
+      body,
+      'EMERGENCY: Unknown — nearby SOS needs help.\n'
+      'Type: general\n'
+      'Call 112.',
+    );
   });
 }

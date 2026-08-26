@@ -77,21 +77,6 @@ class MeshDatabase extends _$MeshDatabase {
     outboxEvents,
   )..where((t) => t.siteId.equals(siteId) & t.state.equals('ready'))).watch();
 
-  Future<void> markQueuedIfReady(String eventId, int nowMs) =>
-      (update(outboxEvents)
-            ..where((t) => t.eventId.equals(eventId) & t.state.equals('ready')))
-          .write(
-            OutboxEventsCompanion(
-              state: const Value('queued'),
-              updatedAtMs: Value(nowMs),
-            ),
-          );
-
-  Future<void> promoteQueued(String siteId) =>
-      (update(outboxEvents)
-            ..where((t) => t.siteId.equals(siteId) & t.state.equals('queued')))
-          .write(const OutboxEventsCompanion(state: Value('ready')));
-
   /// Watches a single outbox row by [eventId] — e.g. the emergency active
   /// screen's delivery status for the SOS it just queued. Emits null once
   /// the row no longer exists (should not normally happen; rows are never
@@ -126,30 +111,6 @@ class MeshDatabase extends _$MeshDatabase {
   Future<void> expireOverdue(int nowMs) =>
       (update(outboxEvents)..where(
             (t) =>
-                t.expiresAtMs.isSmallerThanValue(nowMs) &
-                t.state.isNotValue('acked'),
-          ))
-          .write(
-            OutboxEventsCompanion(
-              state: const Value('expired'),
-              updatedAtMs: Value(nowMs),
-            ),
-          );
-
-  Future<List<OutboxEvent>> overdueForSite(String siteId, int nowMs) =>
-      (select(outboxEvents)..where(
-            (t) =>
-                t.siteId.equals(siteId) &
-                t.expiresAtMs.isSmallerThanValue(nowMs) &
-                t.state.isNotValue('acked') &
-                t.state.isNotValue('expired'),
-          ))
-          .get();
-
-  Future<void> expireOverdueForSite(String siteId, int nowMs) =>
-      (update(outboxEvents)..where(
-            (t) =>
-                t.siteId.equals(siteId) &
                 t.expiresAtMs.isSmallerThanValue(nowMs) &
                 t.state.isNotValue('acked'),
           ))

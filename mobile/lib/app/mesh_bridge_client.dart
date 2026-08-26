@@ -29,20 +29,22 @@ class MeshPeerSnapshot {
     required this.peerId,
     required this.connected,
     required this.rssi,
-    this.txPowerAtOneMeter,
     required this.lastSeenMs,
+    this.mtu = 0,
   });
 
   final String peerId;
   final bool connected;
 
+  /// Negotiated ATT MTU for this peer's GATT link, or 0 when the foreground
+  /// task has not reported one yet. This is the byte budget room voice checks
+  /// against before recording (see `feature/rooms/room_voice_capacity.dart`);
+  /// the task has always sent it, it just was not surfaced here before.
+  final int mtu;
+
   /// Raw BLE RSSI in dBm, or null if the platform did not report one for
   /// this peer (e.g. server-side sessions before a scan result arrives).
   final int? rssi;
-
-  /// Advertised TX power calibration at one meter, when the peer included it.
-  /// Null preserves the conservative historical -59 dBm default.
-  final int? txPowerAtOneMeter;
   final int lastSeenMs;
 
   /// Rough distance estimate in meters from [rssi], using the standard
@@ -56,7 +58,7 @@ class MeshPeerSnapshot {
   double? get estimatedDistanceMeters {
     final value = rssi;
     if (value == null) return null;
-    final txPowerAtOneMeter = this.txPowerAtOneMeter ?? -59;
+    const txPowerAtOneMeter = -59;
     const pathLossExponent = 2.5;
     return math
         .pow(10, (txPowerAtOneMeter - value) / (10 * pathLossExponent))
@@ -178,7 +180,6 @@ class MeshBridgeClient {
   bool _deliveringToAdmin = false;
   bool _adminDeliveryRerunRequested = false;
   Timer? _inboxSyncTimer;
-  Timer? _outboxExpiryTimer;
   bool _syncingInbox = false;
   String? _reporterUid;
   GatewayBridge? _contactBridge;
@@ -287,11 +288,6 @@ class MeshBridgeClient {
 
   void _activateOutbox() {
     unawaited(_restartOutbox());
-    _outboxExpiryTimer ??= Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => unawaited(_expireOverdue()),
-    );
-    unawaited(_expireOverdue());
     if (!syncRelayInbox) return;
     unawaited(_syncRelayInbox());
     _inboxSyncTimer ??= Timer.periodic(
@@ -302,29 +298,6 @@ class MeshBridgeClient {
 
   void setSiteId(String siteId) {
     prepareForSite(siteId: siteId);
-  }
-
-  Future<void> _expireOverdue() async {
-    final siteId = _siteId;
-    if (siteId == null) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final overdue = await _db.overdueForSite(siteId, now);
-    if (overdue.isEmpty) return;
-    await _db.expireOverdueForSite(siteId, now);
-    for (final row in overdue) {
-      if (row.payloadType != PayloadType.structuredSos.name ||
-          row.objectId == null) {
-        continue;
-      }
-      unawaited(
-        _emitSosDelivery(
-          kind: SosDeliveryEventKind.expired,
-          objectId: row.objectId!,
-          eventId: row.eventId,
-          detail: 'SOS delivery window expired before a peer acknowledged it.',
-        ),
-      );
-    }
   }
 
   Future<void> _restartOutbox() async {
@@ -352,10 +325,6 @@ class MeshBridgeClient {
         );
       },
     )..start();
-    final peerCount = _meshStatus.peerCount;
-    if (peerCount > 0) {
-      unawaited(_outbox!.onPeerCountChanged(peerCount));
-    }
   }
 
   Future<void> _emitSosDelivery({
@@ -407,7 +376,7 @@ class MeshBridgeClient {
       return;
     }
     if (!await FlutterForegroundTask.isRunningService) {
-      throw const MeshTransportUnavailable('event mode is not running');
+      throw StateError('event mode is not running');
     }
     final pending = Completer<void>();
     _pendingSubmissions[envelope.objectId] = pending;
@@ -416,9 +385,7 @@ class MeshBridgeClient {
       () {
         if (!pending.isCompleted) {
           pending.completeError(
-            const MeshTransportUnavailable(
-              'foreground mesh did not acknowledge the object',
-            ),
+            StateError('foreground mesh did not accept the object'),
           );
         }
         _pendingSubmissions.remove(envelope.objectId);
@@ -502,8 +469,8 @@ class MeshBridgeClient {
             MeshPeerSnapshot(
               peerId: '${peer['peerId'] ?? ''}',
               connected: peer['connected'] == null || peer['connected'] == true,
+              mtu: (peer['mtu'] as num?)?.toInt() ?? 0,
               rssi: (peer['rssi'] as num?)?.toInt(),
-              txPowerAtOneMeter: (peer['txPowerAtOneMeter'] as num?)?.toInt(),
               lastSeenMs: (peer['lastSeenMs'] as num?)?.toInt() ?? 0,
             ),
         ]..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
@@ -517,11 +484,6 @@ class MeshBridgeClient {
             peers: snapshots,
           ),
         );
-        final connectedCount = peerMaps.where((peer) {
-          final connected = peer['connected'];
-          return connected == null || connected == true;
-        }).length;
-        unawaited(_outbox?.onPeerCountChanged(connectedCount));
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
@@ -606,9 +568,7 @@ class MeshBridgeClient {
       case 'error' || 'stopped':
         _updateMeshStatus((_) => MeshStatus.stopped);
         _failPendingSubmissions(
-          MeshTransportUnavailable(
-            data['message'] as String? ?? 'foreground mesh stopped',
-          ),
+          StateError(data['message'] as String? ?? 'foreground mesh stopped'),
         );
     }
   }
@@ -848,6 +808,17 @@ class MeshBridgeClient {
   }
 
   Future<void> _storeReceived(ReceivedObject received) async {
+    // An object this device originated comes back to it over the mesh: a peer
+    // store-and-forwards it onward, and the relay's durable inbox replays every
+    // authenticated envelope it holds — including our own. Persisting that copy
+    // showed the author their own room message a second time as an incoming
+    // one. The origin id is inside the authenticated envelope, so a foreign
+    // object cannot forge its way past this check.
+    final localEphemeralId = _localEphemeralId;
+    if (localEphemeralId != null &&
+        received.envelope.originEphemeralId == localEphemeralId) {
+      return;
+    }
     final objectId = received.envelope.objectId;
     if (_storedObjectIds.add(objectId)) {
       try {
@@ -918,8 +889,6 @@ class MeshBridgeClient {
   }
 
   Future<void> dispose() async {
-    _outboxExpiryTimer?.cancel();
-    _outboxExpiryTimer = null;
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
     _adminDeliveryTimer?.cancel();
@@ -932,9 +901,7 @@ class MeshBridgeClient {
     }
     await _outbox?.dispose();
     _outbox = null;
-    _failPendingSubmissions(
-      const MeshTransportUnavailable('mesh bridge disposed'),
-    );
+    _failPendingSubmissions(StateError('mesh bridge disposed'));
     _siteId = null;
     _localEphemeralId = null;
     _storedObjectIds.clear();

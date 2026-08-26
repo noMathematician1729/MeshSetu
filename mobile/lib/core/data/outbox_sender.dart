@@ -6,23 +6,6 @@ import '../model/model.dart';
 import '../protocol/relay_engine.dart';
 import 'database.dart';
 
-/// Thrown when an outbox row cannot be handed to the mesh right now for a
-/// reason that is expected to clear on its own — the BLE foreground service
-/// is not running yet, or it has not acknowledged the submission.
-///
-/// This is deliberately distinct from a rejection: a room message or SOS must
-/// not be marked permanently `failed` just because the radio was still
-/// starting when the user hit send. [OutboxSender] retries these without
-/// consuming a delivery attempt.
-class MeshTransportUnavailable implements Exception {
-  const MeshTransportUnavailable(this.reason);
-
-  final String reason;
-
-  @override
-  String toString() => 'MeshTransportUnavailable: $reason';
-}
-
 /// Drains `state = ready` [OutboxEvents] rows through a caller-supplied
 /// `send` callback and reflects ACK/expiry metrics back onto the row,
 /// implementing the CREATED -> READY -> RELAYING -> ACKED|EXPIRED state
@@ -42,7 +25,6 @@ class OutboxSender {
     required this.localEphemeralId,
     this.maxAttempts = 5,
     this.retryBaseDelay = const Duration(seconds: 1),
-    this.transportRetryDelay = const Duration(seconds: 5),
     this.onDeliveryFailure,
   }) : assert(maxAttempts > 0),
        assert(retryBaseDelay > Duration.zero);
@@ -53,10 +35,6 @@ class OutboxSender {
   final int localEphemeralId;
   final int maxAttempts;
   final Duration retryBaseDelay;
-
-  /// Retry spacing used while the transport itself is unavailable, where
-  /// attempts are not counted against [maxAttempts].
-  final Duration transportRetryDelay;
   final void Function(OutboxEvent row, Object error)? onDeliveryFailure;
 
   StreamSubscription<List<OutboxEvent>>? _sub;
@@ -91,35 +69,14 @@ class OutboxSender {
     });
   }
 
-  /// Called by the bridge when a real connected peer becomes available. Rows
-  /// that were accepted into the local relay scheduler but had no peer are
-  /// promoted back to ready so the scheduler can attempt a handoff.
-  Future<void> onPeerCountChanged(int peerCount) async {
-    if (peerCount > 0) await _db.promoteQueued(siteId);
-  }
-
   Future<void> onMetrics(List<RelayMetric> metrics) async {
     for (final m in metrics) {
       final objectId = m.objectId;
       if (objectId == null) continue;
-      if (m.kind == 'frames_sent') {
-        await _markByObjectId(
-          objectId,
-          'relaying',
-          fromStates: const {'ready', 'queued', 'relaying'},
-        );
-      } else if (m.kind == 'ack') {
-        await _markByObjectId(
-          objectId,
-          'acked',
-          fromStates: const {'ready', 'queued', 'relaying'},
-        );
+      if (m.kind == 'ack') {
+        await _markByObjectId(objectId, 'acked');
       } else if (m.kind == 'expired') {
-        await _markByObjectId(
-          objectId,
-          'expired',
-          fromStates: const {'ready', 'queued', 'relaying'},
-        );
+        await _markByObjectId(objectId, 'expired');
       }
     }
   }
@@ -142,19 +99,22 @@ class OutboxSender {
     _retryAfterMs.remove(row.eventId);
     _retryTimers.remove(row.eventId)?.cancel();
     _attempts.remove(row.eventId);
+    if (row.state == 'ready') {
+      await _db.markState(
+        row.eventId,
+        'relaying',
+        DateTime.now().millisecondsSinceEpoch,
+      );
+    }
   }
 
-  Future<void> _markByObjectId(
-    int objectId,
-    String state, {
-    required Set<String> fromStates,
-  }) async {
+  Future<void> _markByObjectId(int objectId, String state) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await (_db.update(_db.outboxEvents)..where(
           (t) =>
               t.siteId.equals(siteId) &
               t.objectId.equals(objectId) &
-              t.state.isIn(fromStates),
+              t.state.equals('relaying'),
         ))
         .write(
           OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(now)),
@@ -178,6 +138,7 @@ class OutboxSender {
         await _db.markState(row.eventId, 'expired', now);
         return;
       }
+      await _db.markState(row.eventId, 'relaying', now);
       await _send(
         MeshEnvelope(
           objectId: objectId,
@@ -194,25 +155,11 @@ class OutboxSender {
           originEphemeralId: localEphemeralId,
         ),
       );
-      // The foreground coordinator can accept an object into its durable
-      // scheduler with zero peers. Keep that distinction visible as queued;
-      // frames_sent is the transition to genuine peer handoff.
-      await _db.markQueuedIfReady(
-        row.eventId,
-        DateTime.now().millisecondsSinceEpoch,
-      );
       _attempts.remove(row.eventId);
     } catch (error) {
-      // A radio that has not started yet is not a delivery failure. Keeping
-      // the attempt counter untouched means a message typed a moment before
-      // Event Mode came up still goes out, instead of dying after five fast
-      // retries and needing the user to retype it.
-      final consumesAttempt = error is! MeshTransportUnavailable;
-      final attempt = consumesAttempt
-          ? (_attempts[row.eventId] ?? 0) + 1
-          : (_attempts[row.eventId] ?? 0);
-      if (consumesAttempt) _attempts[row.eventId] = attempt;
-      if (consumesAttempt && attempt >= maxAttempts) {
+      final attempt = (_attempts[row.eventId] ?? 0) + 1;
+      _attempts[row.eventId] = attempt;
+      if (attempt >= maxAttempts) {
         _attempts.remove(row.eventId);
         await _db.markState(
           row.eventId,
@@ -226,9 +173,7 @@ class OutboxSender {
       // a stopped foreground task cannot spin the same row forever. A later
       // bridge restart can drain the READY row again because the retry state
       // is deliberately local to this sender instance.
-      final delay = consumesAttempt
-          ? retryBaseDelay * (1 << (attempt - 1).clamp(0, 4))
-          : transportRetryDelay;
+      final delay = retryBaseDelay * (1 << (attempt - 1).clamp(0, 4));
       final retryAt =
           DateTime.now().millisecondsSinceEpoch + delay.inMilliseconds;
       _retryAfterMs[row.eventId] = retryAt;
@@ -259,6 +204,10 @@ class OutboxSender {
         PayloadType.responderUpdate => PriorityBand.p1High,
         PayloadType.voiceManifest ||
         PayloadType.voiceObject => PriorityBand.p2Normal,
+        // Bulk band so a multi-kilobyte voice note is preempted mid-transfer
+        // by room text and SOS traffic (`MeshTransportCoordinator` checks
+        // `hasHigherPriorityThan` between frame writes).
+        PayloadType.roomVoice => PriorityBand.p3Bulk,
         _ => PriorityBand.p2Normal,
       };
 

@@ -114,24 +114,51 @@ abstract final class SosIncidentNavigator {
     _pendingMeshIncident = incident;
   }
 
+  /// Upper bound on frames spent waiting for the root navigator to mount.
+  /// Guards against retrying forever when no UI is ever attached.
+  static const int _maxFlushFrames = 60;
+  static int _flushFrames = 0;
+  static bool _flushScheduled = false;
+
   /// Flushes a tap that arrived before the navigator existed.
+  ///
+  /// A cold start mounts [MaterialApp] over several frames: its asynchronous
+  /// `localizationsDelegates` resolve before the root navigator is built, so
+  /// the navigator can still be absent during the first post-frame callback.
+  /// Retry on later frames instead of dropping the destination, otherwise a
+  /// notification tap that launched the app leaves the user on the home
+  /// screen.
   static void openPending() {
+    if (_flushPending()) {
+      _flushFrames = 0;
+      return;
+    }
+    _scheduleFlush();
+  }
+
+  /// Pushes whichever destination is pending. Returns `true` when there is
+  /// nothing left to deliver, `false` while the navigator is unavailable.
+  static bool _flushPending() {
     final eventId = _pendingEventId;
-    if (eventId != null) {
-      if (_push(eventId)) return;
-      _pendingEventId = eventId;
-      return;
-    }
+    if (eventId != null) return _push(eventId);
     final compactAlert = _pendingCompactAlert;
-    if (compactAlert != null) {
-      if (_pushCompactAlert(compactAlert)) return;
-      _pendingCompactAlert = compactAlert;
-      return;
-    }
+    if (compactAlert != null) return _pushCompactAlert(compactAlert);
     final incident = _pendingMeshIncident;
-    if (incident == null) return;
-    if (_pushMeshIncident(incident)) return;
-    _pendingMeshIncident = incident;
+    if (incident != null) return _pushMeshIncident(incident);
+    return true;
+  }
+
+  static void _scheduleFlush() {
+    if (_flushScheduled || _flushFrames >= _maxFlushFrames) return;
+    _flushScheduled = true;
+    final binding = WidgetsBinding.instance;
+    binding.addPostFrameCallback((_) {
+      _flushScheduled = false;
+      _flushFrames++;
+      openPending();
+    });
+    // A post-frame callback only runs if another frame is produced.
+    binding.ensureVisualUpdate();
   }
 
   static bool _pushCompactAlert(MeshSosAdvertisement alert) {

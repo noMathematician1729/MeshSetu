@@ -1,5 +1,26 @@
 import 'dart:typed_data';
 
+/// Languages supported by the offline multilingual STT model and profile UI.
+enum SttLanguage {
+  english('English', 'en'),
+  hindi('Hindi', 'hi'),
+  marathi('Marathi', 'mr'),
+  gujarati('Gujarati', 'gu');
+
+  const SttLanguage(this.displayName, this.code);
+
+  final String displayName;
+  final String code;
+
+  static SttLanguage? fromDisplayName(String value) {
+    final normalized = value.trim().toLowerCase();
+    for (final language in values) {
+      if (language.displayName.toLowerCase() == normalized) return language;
+    }
+    return null;
+  }
+}
+
 /// Bible §12.1 — the frozen contract Dev C implements and Dev B/networking
 /// code consumes. Networking and UI code must call only this interface so
 /// the STT backend (whisper.cpp vs sherpa-onnx) can change without touching
@@ -18,8 +39,12 @@ final class SttResult {
 }
 
 abstract interface class OfflineSttEngine {
-  Future<void> warmUp();
-  Future<SttResult> transcribe(Uint8List pcm16le, {int sampleRateHz = 16000});
+  Future<void> warmUp({SttLanguage language = SttLanguage.english});
+  Future<SttResult> transcribe(
+    Uint8List pcm16le, {
+    int sampleRateHz = 16000,
+    SttLanguage language = SttLanguage.english,
+  });
   Future<void> close();
 }
 
@@ -32,10 +57,14 @@ final class NullSttEngine implements OfflineSttEngine {
   const NullSttEngine();
 
   @override
-  Future<void> warmUp() async {}
+  Future<void> warmUp({SttLanguage language = SttLanguage.english}) async {}
 
   @override
-  Future<SttResult> transcribe(Uint8List pcm16le, {int sampleRateHz = 16000}) {
+  Future<SttResult> transcribe(
+    Uint8List pcm16le, {
+    int sampleRateHz = 16000,
+    SttLanguage language = SttLanguage.english,
+  }) {
     throw StateError('no OfflineSttEngine installed');
   }
 

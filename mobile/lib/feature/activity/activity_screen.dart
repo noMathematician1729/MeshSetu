@@ -151,7 +151,7 @@ class _OutboxRow extends StatelessWidget {
 
   static (String, MeshStatusTone) _deliveryStatus(String? state) =>
       switch (state) {
-        'ready' || 'queued' => ('Waiting', MeshStatusTone.neutral),
+        'ready' => ('Waiting', MeshStatusTone.neutral),
         'relaying' => ('Relaying', MeshStatusTone.neutral),
         'acked' => ('Delivered', MeshStatusTone.active),
         'expired' => ('Expired', MeshStatusTone.critical),
@@ -174,24 +174,23 @@ class _ReceivedIncidentsSection extends ConsumerWidget {
     return StreamBuilder<List<InboxEvent>>(
       stream: db.watchInboxSite(siteId),
       builder: (context, snapshot) {
-        final rows =
-            (snapshot.data ?? const <InboxEvent>[])
-                .where(
-                  (row) => row.payloadType == PayloadType.structuredSos.name,
-                )
-                .toList()
-              ..sort((a, b) => b.receivedAtMs.compareTo(a.receivedAtMs));
+        final rows = (snapshot.data ?? const <InboxEvent>[])
+            .where(
+              (row) => row.payloadType == PayloadType.structuredSos.name,
+            )
+            .toList()
+          ..sort((a, b) => b.receivedAtMs.compareTo(a.receivedAtMs));
         return _ActivitySection(
           title: 'Received incidents',
           subtitle: rows.isEmpty
               ? null
               : '${rows.length} relayed to this device',
           emptyIcon: Icons.inbox_outlined,
-          emptyMessage:
-              'SOS incidents relayed to you over the mesh appear here.',
+          emptyMessage: 'SOS incidents relayed to you over the mesh appear here.',
           isEmpty: rows.isEmpty,
           children: [
-            for (final row in rows) _IncidentRow(row: row, siteId: siteId),
+            for (final row in rows)
+              _IncidentRow(row: row, siteId: siteId),
           ],
         );
       },
@@ -284,8 +283,7 @@ class _VoiceEvidenceSection extends ConsumerWidget {
               ? null
               : '$verified of ${rows.length} verified',
           emptyIcon: Icons.graphic_eq,
-          emptyMessage:
-              'Verified voice clips received over the mesh appear here.',
+          emptyMessage: 'Verified voice clips received over the mesh appear here.',
           isEmpty: rows.isEmpty,
           children: [
             MeshCard(
@@ -296,7 +294,10 @@ class _VoiceEvidenceSection extends ConsumerWidget {
               ),
               child: Row(
                 children: [
-                  Icon(Icons.graphic_eq, color: MeshPalette.of(context).mesh),
+                  Icon(
+                    Icons.graphic_eq,
+                    color: MeshPalette.of(context).mesh,
+                  ),
                   const SizedBox(width: MeshSpace.md),
                   Expanded(
                     child: Text(
@@ -346,7 +347,10 @@ class _ActivitySection extends StatelessWidget {
         MeshCard(
           child: Row(
             children: [
-              Icon(emptyIcon, color: MeshPalette.of(context).textMuted),
+              Icon(
+                emptyIcon,
+                color: MeshPalette.of(context).textMuted,
+              ),
               const SizedBox(width: MeshSpace.md),
               Expanded(
                 child: Text(

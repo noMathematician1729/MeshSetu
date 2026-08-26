@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'event_mode_launcher.dart';
@@ -39,6 +40,44 @@ abstract final class RoomMeshBootstrap {
       _requestIdentityWithRetry(bridge);
     }
     return result;
+  }
+
+  /// Binds the UI-isolate outbox bridge to [siteId] **without** starting the
+  /// foreground service or triggering any permission prompt.
+  ///
+  /// Room screens call this on open. Without it the durable outbox is never
+  /// constructed for the room's site, so an offline-composed message is
+  /// written to `outboxEvents` as `ready` and then sits there forever: the
+  /// live internet socket is wired up independently in the screen's
+  /// `initState`, which is why room chat appeared to work online but never
+  /// delivered offline. When Event Mode is already running (started from Home
+  /// or a previous session) this also re-requests the task identity so the
+  /// outbox activates immediately instead of waiting for the user to press
+  /// "Start event mode" inside the room.
+  static Future<void> attachForSite({
+    required WidgetRef ref,
+    required String siteId,
+  }) async {
+    // Room screens call this from `initState`, and `_ensureBridge` writes to
+    // `meshBridgeClientProvider`. Riverpod forbids modifying a provider during
+    // a widget lifecycle callback, so yield first: a microtask runs after the
+    // synchronous build/initState phase has finished, which makes the write
+    // legal without changing when the bridge becomes available in practice.
+    await Future<void>.microtask(() {});
+    final bridge = _ensureBridge(ref);
+    bridge.prepareForSite(siteId: siteId);
+    bool running;
+    try {
+      running = await FlutterForegroundTask.isRunningService;
+    } catch (_) {
+      // Plugin unavailable (unit tests / unsupported platform). Preparing the
+      // bridge above is still the useful half of this call.
+      return;
+    }
+    if (!running) return;
+    // The already-running task may have been configured for a different site.
+    await EventModeLauncher.configureMeshSite(siteId);
+    _requestIdentityWithRetry(bridge);
   }
 
   static void _requestIdentityWithRetry(MeshBridgeClient bridge) {

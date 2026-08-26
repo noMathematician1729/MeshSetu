@@ -508,7 +508,7 @@ void main() {
     expect(coordinator.relay.nextOutbound(), isNotNull);
   });
 
-  test('rejects and closes a peer whose HELLO is for a foreign site', () async {
+  test('admits a peer whose HELLO carries a different site fingerprint', () async {
     final localHello = const Hello(
       siteFingerprint: 111,
       ephemeralNodeId: 1,
@@ -540,8 +540,10 @@ void main() {
     );
 
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(link.closed, isTrue);
-    expect(coordinatorA.peerCount, 0);
+    // Site scoping is no longer a link-admission gate; it is enforced by the
+    // AEAD site key at the envelope layer.
+    expect(link.closed, isFalse);
+    expect(coordinatorA.peerCount, 1);
   });
 
   test(
@@ -1159,7 +1161,7 @@ void main() {
     },
   );
 
-  test('foreign server HELLO remains quarantined after detaching', () async {
+  test('server admits a different-site HELLO from a GATT client', () async {
     final peripheral = _FakePeripheral();
     UniversalBlePeripheral.setInstance(peripheral);
     addTearDown(
@@ -1215,8 +1217,9 @@ void main() {
     );
     expect(result, isNull);
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(coordinator.peerCount, 0);
-    expect(server.isPeerRejected('foreign-peer'), isTrue);
+    // A different site fingerprint no longer quarantines the GATT client.
+    expect(coordinator.peerCount, 1);
+    expect(server.isPeerRejected('foreign-peer'), isFalse);
     await coordinator.stop();
   });
 

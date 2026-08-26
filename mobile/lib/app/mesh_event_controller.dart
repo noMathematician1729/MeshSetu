@@ -219,16 +219,9 @@ class MeshEventController {
       var advertisingActive = false;
       try {
         await MeshAdvertiser.start(_discoveryMetadata!);
-        _reportMetrics([
-          const RelayMetric('advertising_started'),
-          const RelayMetric('advertising_verified'),
-          RelayMetric(
-            'advertising_tier',
-            value:
-                MeshAdvertiser.capabilities?.effectiveExtendedTxPowerLevel ??
-                MeshAdvertiser.capabilities?.effectiveTxPowerLevel,
-            detail: _advertisingDiagnosticsDetail(),
-          ),
+        _reportMetrics(const [
+          RelayMetric('advertising_started'),
+          RelayMetric('advertising_verified'),
         ]);
         advertisingActive = true;
       } catch (error) {
@@ -352,14 +345,12 @@ class MeshEventController {
             'peer_discovered',
             peerId: peer.device.deviceId,
             value: peer.device.rssi,
-            detail: 'tx_power=${peer.device.txPower ?? '?'}',
           ),
         for (final peer in peers)
           RelayMetric(
             'scan_found',
             peerId: peer.device.deviceId,
             value: peer.device.rssi,
-            detail: 'tx_power=${peer.device.txPower ?? '?'}',
           ),
       ]);
       final healthAction = _healthWatchdog.recordCycle(
@@ -508,38 +499,13 @@ class MeshEventController {
     }
   }
 
-  String _advertisingDiagnosticsDetail() {
-    final capabilities = MeshAdvertiser.capabilities;
-    if (capabilities == null) {
-      return 'tier=${MeshAdvertiser.advertisingTier}; capabilities=unknown';
-    }
-    return [
-      'tier=${MeshAdvertiser.advertisingTier}',
-      'extended=${capabilities.supportsExtendedAdvertising}',
-      'coded=${capabilities.supportsCodedPhy}',
-      'multi=${capabilities.supportsMultipleAdvertisement}',
-      'max_data=${capabilities.maximumAdvertisingDataLength ?? '?'}',
-      'legacy_tx=${capabilities.effectiveTxPowerLevel ?? '?'}',
-      'extended_tx=${capabilities.effectiveExtendedTxPowerLevel ?? '?'}',
-      if (MeshAdvertiser.extendedFallbackReason != null)
-        'fallback=${MeshAdvertiser.extendedFallbackReason}',
-    ].join(';');
-  }
-
   Future<void> _reassertAdvertising() async {
     if (!_looping) return;
     try {
       await MeshAdvertiser.reassert();
-      _reportMetrics([
-        const RelayMetric('advertising_reasserted'),
-        const RelayMetric('advertising_verified'),
-        RelayMetric(
-          'advertising_tier',
-          value:
-              MeshAdvertiser.capabilities?.effectiveExtendedTxPowerLevel ??
-              MeshAdvertiser.capabilities?.effectiveTxPowerLevel,
-          detail: _advertisingDiagnosticsDetail(),
-        ),
+      _reportMetrics(const [
+        RelayMetric('advertising_reasserted'),
+        RelayMetric('advertising_verified'),
       ]);
     } catch (error) {
       _reportMetrics([
@@ -706,7 +672,6 @@ class MeshEventController {
         GattPeerSessionLink(session),
         siteFingerprint: peer.metadata.fingerprint,
         rssi: peer.device.rssi,
-        txPowerAtOneMeter: peer.device.txPower,
       );
       _retryAfterMs.remove(peer.device.deviceId);
     } catch (error) {
@@ -815,15 +780,6 @@ class MeshEventController {
             ),
             RelayMetric(
               'sos_alert_broadcast',
-              objectId: objectId,
-              value: alert.sequence,
-            ),
-          ]);
-        },
-        onRestored: () {
-          _reportMetrics([
-            RelayMetric(
-              'sos_alert_broadcast_restored',
               objectId: objectId,
               value: alert.sequence,
             ),
