@@ -42,6 +42,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
   final _textController = TextEditingController();
   final _voicePlayer = RoomVoicePlayer();
   RoomVoiceRecorder? _voiceRecorder;
+  RoomVoiceClip? _pendingVoiceClip;
   Timer? _voiceTicker;
   Duration _voiceElapsed = Duration.zero;
   bool _recordingVoice = false;
@@ -63,9 +64,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     // Bind the durable mesh outbox to this room's site up front. The live
     // socket below is only the online path; without this the offline path has
     // no sender attached and messages never leave `outboxEvents`.
-    unawaited(
-      RoomMeshBootstrap.attachForSite(ref: ref, siteId: widget.siteId),
-    );
+    unawaited(RoomMeshBootstrap.attachForSite(ref: ref, siteId: widget.siteId));
     unawaited(_connectLiveTransport());
     unawaited(_announcePresence());
   }
@@ -209,7 +208,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
   /// Rough size of the shortest voice note worth sending (one second of audio
   /// plus packet framing). Recording is only refused up front when even this
   /// cannot cross the link; a clip that turns out too large for the link is
-  /// caught precisely in [_finishVoiceCapture].
+  /// caught precisely in [_stopVoiceCapture].
   static int get _shortestVoicePacketBytes =>
       RoomVoiceRecorder.bitRate ~/ 8 + RoomVoicePacketCodec.overheadBytes + 64;
 
@@ -229,7 +228,9 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
       return;
     }
     await _voicePlayer.stop();
-    final recorder = RoomVoiceRecorder();
+    final recorder = RoomVoiceRecorder(
+      onCapReached: () => unawaited(_stopVoiceCapture()),
+    );
     _voiceRecorder = recorder;
     try {
       await recorder.start();
@@ -257,12 +258,13 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     _voiceTicker = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted) return;
       setState(() => _voiceElapsed = recorder.elapsed);
-      // The recorder stops itself at the cap; reflect that in the UI and send.
-      if (recorder.elapsed >= recorder.cap) unawaited(_finishVoiceCapture());
     });
   }
 
-  Future<void> _finishVoiceCapture() async {
+  /// Stops the microphone and retains the completed clip locally. Delivery is
+  /// deliberately separate: the user must tap the composer send button after
+  /// reviewing the stopped state, so tapping the mic never sends audio.
+  Future<void> _stopVoiceCapture() async {
     final recorder = _voiceRecorder;
     if (recorder == null || _sendingVoice) return;
     _sendingVoice = true;
@@ -276,22 +278,25 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
       setState(() {
         _recordingVoice = false;
         _voiceElapsed = Duration.zero;
+        _pendingVoiceClip = clip;
       });
       if (clip == null) {
         setState(
           () => _error =
-              'Hold the microphone to record, release to send '
-              '(minimum ${RoomVoiceRecorder.minClip.inMilliseconds} ms).',
+              'Record at least ${RoomVoiceRecorder.minClip.inMilliseconds} ms '
+              'before stopping the microphone.',
         );
-        return;
       }
-      await _sendVoiceClip(clip);
     } finally {
       _sendingVoice = false;
+      if (mounted) setState(() {});
     }
   }
 
-  Future<void> _cancelVoiceCapture() async {
+  /// Discards either the live capture or a stopped voice note that has not yet
+  /// been sent. A pending clip never enters the durable outbox until
+  /// [_sendPendingVoice] succeeds.
+  Future<void> _discardVoice() async {
     final recorder = _voiceRecorder;
     _voiceTicker?.cancel();
     _voiceTicker = null;
@@ -301,16 +306,36 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     setState(() {
       _recordingVoice = false;
       _voiceElapsed = Duration.zero;
+      _pendingVoiceClip = null;
+      _error = null;
     });
   }
 
-  /// Accessible equivalent of press-and-hold: assistive technology activates
-  /// the mic once to start and once again to stop, since it cannot express a
-  /// sustained press.
-  Future<void> _toggleVoiceCapture() =>
-      _recordingVoice ? _finishVoiceCapture() : _startVoiceCapture();
+  /// The microphone is a simple tap toggle: tap once to begin recording and
+  /// once again to stop. It cannot start a new capture while an unsent clip is
+  /// pending; discard or send that clip first.
+  Future<void> _toggleVoiceCapture() {
+    if (_recordingVoice) return _stopVoiceCapture();
+    if (_pendingVoiceClip != null) return Future.value();
+    return _startVoiceCapture();
+  }
 
-  Future<void> _sendVoiceClip(RoomVoiceClip clip) async {
+  Future<void> _sendPendingVoice() async {
+    final clip = _pendingVoiceClip;
+    if (clip == null || _sendingVoice) return;
+    _sendingVoice = true;
+    try {
+      final sent = await _sendVoiceClip(clip);
+      if (sent && mounted) {
+        setState(() => _pendingVoiceClip = null);
+      }
+    } finally {
+      _sendingVoice = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<bool> _sendVoiceClip(RoomVoiceClip clip) async {
     final policy = policyForRole(widget.roomId, widget.role);
     final userRoles = ref.read(userRolesProvider);
     // Precise check now that the real clip size is known: refuse a note the
@@ -325,7 +350,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     );
     if (blocked != null) {
       setState(() => _error = blocked);
-      return;
+      return false;
     }
     try {
       await RoomMessageDispatcher(
@@ -338,8 +363,10 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
         durationMs: clip.durationMs,
       );
       if (mounted) setState(() => _error = null);
+      return true;
     } on StateError catch (e) {
       if (mounted) setState(() => _error = e.message);
+      return false;
     }
   }
 
@@ -586,8 +613,15 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                   ? _VoiceRecordingBar(
                       elapsed: _voiceElapsed,
                       cap: RoomVoiceRecorder.maxClip,
-                      onCancel: _cancelVoiceCapture,
-                      onSend: _finishVoiceCapture,
+                      onDiscard: _discardVoice,
+                      onStop: _toggleVoiceCapture,
+                    )
+                  : _pendingVoiceClip != null
+                  ? _PendingVoiceBar(
+                      clip: _pendingVoiceClip!,
+                      sending: _sendingVoice,
+                      onDiscard: _discardVoice,
+                      onSend: _sendPendingVoice,
                     )
                   : Row(
                       crossAxisAlignment: CrossAxisAlignment.end,
@@ -606,12 +640,7 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                           ),
                         ),
                         const SizedBox(width: MeshSpace.sm),
-                        _PushToTalkButton(
-                          onPressStart: _startVoiceCapture,
-                          onPressEnd: _finishVoiceCapture,
-                          onPressCancel: _cancelVoiceCapture,
-                          onAccessibleActivate: _toggleVoiceCapture,
-                        ),
+                        _MicToggleButton(onTap: _toggleVoiceCapture),
                         const SizedBox(width: MeshSpace.sm),
                         IconButton.filled(
                           tooltip: 'Send message',
@@ -797,10 +826,7 @@ class _VoiceBubbleBody extends StatelessWidget {
               color: foreground.withValues(alpha: .72),
             ),
             const SizedBox(width: MeshSpace.sm),
-            Text(
-              '${seconds}s voice note',
-              style: TextStyle(color: foreground),
-            ),
+            Text('${seconds}s voice note', style: TextStyle(color: foreground)),
           ],
         );
       },
@@ -808,67 +834,41 @@ class _VoiceBubbleBody extends StatelessWidget {
   }
 }
 
-/// Press-and-hold microphone.
-///
-/// [onPressStart] fires on pointer-down rather than on a long-press so the
-/// first syllable is not clipped; dragging off the button cancels the take.
-/// [onAccessibleActivate] gives screen-reader and switch users a start/stop
-/// toggle, because assistive technology cannot express a sustained press.
-class _PushToTalkButton extends StatelessWidget {
-  const _PushToTalkButton({
-    required this.onPressStart,
-    required this.onPressEnd,
-    required this.onPressCancel,
-    required this.onAccessibleActivate,
-  });
+/// Starts a room voice capture with one tap. While a capture is running the
+/// composer shows [_VoiceRecordingBar], whose microphone button stops it — no
+/// hold gesture or release-to-send behavior is involved.
+class _MicToggleButton extends StatelessWidget {
+  const _MicToggleButton({required this.onTap});
 
-  final Future<void> Function() onPressStart;
-  final Future<void> Function() onPressEnd;
-  final Future<void> Function() onPressCancel;
-  final Future<void> Function() onAccessibleActivate;
+  final Future<void> Function() onTap;
 
   @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: 'Record a voice note. Hold to record, release to send.',
-      onTap: () => unawaited(onAccessibleActivate()),
-      excludeSemantics: true,
-      child: GestureDetector(
-        onTapDown: (_) => unawaited(onPressStart()),
-        onTapUp: (_) => unawaited(onPressEnd()),
-        onTapCancel: () => unawaited(onPressCancel()),
-        child: Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          ),
-          child: Icon(
-            Icons.mic_none_rounded,
-            color: Theme.of(context).colorScheme.onSurface,
-          ),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: 'Start recording a voice note',
+    child: IconButton(
+      tooltip: 'Start voice recording',
+      icon: const Icon(Icons.mic_none_rounded),
+      onPressed: () => unawaited(onTap()),
+    ),
+  );
 }
 
-/// Replaces the text composer while a voice note is being captured, so the
-/// elapsed time and the cap are both visible and the take can be abandoned.
+/// Replaces the text composer while a voice note is being captured. The mic
+/// toggles recording off; stopping only prepares a pending clip, which the
+/// following [_PendingVoiceBar] requires the user to explicitly send.
 class _VoiceRecordingBar extends StatelessWidget {
   const _VoiceRecordingBar({
     required this.elapsed,
     required this.cap,
-    required this.onCancel,
-    required this.onSend,
+    required this.onDiscard,
+    required this.onStop,
   });
 
   final Duration elapsed;
   final Duration cap;
-  final Future<void> Function() onCancel;
-  final Future<void> Function() onSend;
+  final Future<void> Function() onDiscard;
+  final Future<void> Function() onStop;
 
   @override
   Widget build(BuildContext context) {
@@ -879,16 +879,21 @@ class _VoiceRecordingBar extends StatelessWidget {
     final remaining = cap - elapsed;
     return Semantics(
       liveRegion: true,
-      label: 'Recording voice note, '
+      label:
+          'Recording voice note, '
           '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)} seconds',
       child: Row(
         children: [
           IconButton(
             tooltip: 'Discard recording',
             icon: const Icon(Icons.delete_outline),
-            onPressed: () => unawaited(onCancel()),
+            onPressed: () => unawaited(onDiscard()),
           ),
-          Icon(Icons.mic, color: palette.ember),
+          IconButton.filled(
+            tooltip: 'Stop recording',
+            icon: const Icon(Icons.mic),
+            onPressed: () => unawaited(onStop()),
+          ),
           const SizedBox(width: MeshSpace.sm),
           Expanded(
             child: Column(
@@ -911,11 +916,59 @@ class _VoiceRecordingBar extends StatelessWidget {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Composer state after the microphone has been stopped. The clip is local and
+/// unsent until the user explicitly taps Send; discard remains available when
+/// they decide not to deliver it.
+class _PendingVoiceBar extends StatelessWidget {
+  const _PendingVoiceBar({
+    required this.clip,
+    required this.sending,
+    required this.onDiscard,
+    required this.onSend,
+  });
+
+  final RoomVoiceClip clip;
+  final bool sending;
+  final Future<void> Function() onDiscard;
+  final Future<void> Function() onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final seconds = (clip.durationMs / 1000).toStringAsFixed(1);
+    return Semantics(
+      liveRegion: true,
+      label: 'Voice note recorded, $seconds seconds. Tap Send to deliver it.',
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Discard voice note',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: sending ? null : () => unawaited(onDiscard()),
+          ),
+          const Icon(Icons.graphic_eq),
           const SizedBox(width: MeshSpace.sm),
+          Expanded(
+            child: Text(
+              '$seconds s voice note ready',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
           IconButton.filled(
             tooltip: 'Send voice note',
-            icon: const Icon(Icons.send_rounded),
-            onPressed: () => unawaited(onSend()),
+            icon: sending
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.send_rounded),
+            onPressed: sending ? null : () => unawaited(onSend()),
           ),
         ],
       ),
@@ -1090,11 +1143,7 @@ class _MeshStatusBar extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: Row(
                   children: [
-                    Icon(
-                      Icons.warning_amber,
-                      size: 14,
-                      color: palette.caution,
-                    ),
+                    Icon(Icons.warning_amber, size: 14, color: palette.caution),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(

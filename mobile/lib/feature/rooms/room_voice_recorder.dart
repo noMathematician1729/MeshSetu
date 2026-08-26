@@ -7,7 +7,7 @@ import 'package:record/record.dart';
 
 import 'room_voice_packet.dart';
 
-/// A finished push-to-talk capture, ready to be framed by
+/// A finished tap-toggle capture, ready to be framed by
 /// [RoomVoicePacketCodec].
 class RoomVoiceClip {
   const RoomVoiceClip({required this.audio, required this.durationMs});
@@ -16,7 +16,7 @@ class RoomVoiceClip {
   final int durationMs;
 }
 
-/// Push-to-talk capture for room voice notes.
+/// Tap-toggle capture for room voice notes.
 ///
 /// Separate from `feature/voice/VoiceRecorder` (SOS evidence) on purpose:
 /// that recorder uses `record`'s default 128 kbps, which produces roughly
@@ -29,7 +29,7 @@ class RoomVoiceClip {
 /// `8 s × 12 kbps ÷ 8 = 12 KB`, which fragments into ~25 frames at a
 /// negotiated 517-byte MTU.
 class RoomVoiceRecorder {
-  RoomVoiceRecorder({AudioRecorder? recorder, Duration? cap})
+  RoomVoiceRecorder({AudioRecorder? recorder, Duration? cap, this.onCapReached})
     : _recorder = recorder ?? AudioRecorder(),
       cap = cap ?? maxClip;
 
@@ -48,6 +48,10 @@ class RoomVoiceRecorder {
 
   final AudioRecorder _recorder;
   final Duration cap;
+
+  /// Invoked after the cap timer has begun stopping the encoder. The caller
+  /// can await [stop] to retrieve the same in-flight clip and update its UI.
+  final void Function()? onCapReached;
 
   DateTime? _startedAt;
   DateTime? _stoppedAt;
@@ -100,6 +104,7 @@ class RoomVoiceRecorder {
     _capTimer = Timer(cap, () {
       _capReached = true;
       _stopping ??= _finish();
+      onCapReached?.call();
     });
   }
 
