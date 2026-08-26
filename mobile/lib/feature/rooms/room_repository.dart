@@ -445,6 +445,12 @@ class RoomRepository {
                   ))
                   .get();
           final messages = <RoomMessage>[];
+          // Event ids this device authored. An object relayed back to its own
+          // author (or replayed from the relay's durable inbox) also lands in
+          // the inbox, and rendering it would duplicate the sender's own
+          // message as an incoming one. Filtering here — not only at the
+          // ingest boundary — also hides copies already stored on disk.
+          final mine = <String>{for (final r in sentRows) r.eventId};
           for (final r in sentRows) {
             if (r.payloadType == PayloadType.roomMessage.name) {
               messages.add(_mineMessageFromRow(r));
@@ -454,6 +460,7 @@ class RoomRepository {
             }
           }
           for (final r in receivedRows) {
+            if (mine.contains(r.eventId)) continue;
             if (r.payloadType == PayloadType.roomMessage.name) {
               final message = _decodeMessage(r);
               if (message != null) messages.add(message);

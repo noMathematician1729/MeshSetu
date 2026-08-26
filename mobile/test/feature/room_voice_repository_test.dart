@@ -329,6 +329,69 @@ void main() {
 
       expect(await db.select(db.inboxEvents).get(), hasLength(1));
     });
+
+    test('a voice note relayed back to its author is not shown twice', () async {
+      final eventId = await repository.sendVoiceMessage(
+        policy: _publicPolicy,
+        userRoles: _publicRoles,
+        audio: _clip(400),
+        durationMs: 1500,
+      );
+      final sent = await (db.select(
+        db.outboxEvents,
+      )..where((t) => t.eventId.equals(eventId))).getSingle();
+      await db.insertInbox(
+        InboxEventsCompanion.insert(
+          objectId: Value(sent.objectId!),
+          eventId: eventId,
+          siteId: 'site',
+          roomId: 'public',
+          payloadType: sent.payloadType,
+          payload: Uint8List.fromList(sent.payload!),
+          peerId: 'peer-b',
+          receivedAtMs: 50,
+        ),
+      );
+
+      final messages = await repository
+          .watch(policy: _publicPolicy, userRoles: _publicRoles)
+          .first;
+
+      expect(messages, hasLength(1));
+      expect(messages.single.mine, isTrue);
+      expect(messages.single.isVoice, isTrue);
+    });
+
+    test('a text message relayed back to its author is not shown twice', () async {
+      final eventId = await repository.sendMessage(
+        policy: _publicPolicy,
+        userRoles: _publicRoles,
+        text: 'probe',
+      );
+      final sent = await (db.select(
+        db.outboxEvents,
+      )..where((t) => t.eventId.equals(eventId))).getSingle();
+      await db.insertInbox(
+        InboxEventsCompanion.insert(
+          objectId: Value(sent.objectId!),
+          eventId: eventId,
+          siteId: 'site',
+          roomId: 'public',
+          payloadType: sent.payloadType,
+          payload: Uint8List.fromList(sent.payload!),
+          peerId: 'peer-b',
+          receivedAtMs: 50,
+        ),
+      );
+
+      final messages = await repository
+          .watch(policy: _publicPolicy, userRoles: _publicRoles)
+          .first;
+
+      expect(messages, hasLength(1));
+      expect(messages.single.mine, isTrue);
+      expect(messages.single.text, 'probe');
+    });
   });
 
   group('RoomMessageDispatcher.sendVoice', () {

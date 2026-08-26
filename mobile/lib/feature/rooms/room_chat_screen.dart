@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -544,10 +546,15 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                 }
                 return ListView.builder(
                   reverse: true,
-                  padding: const EdgeInsets.symmetric(vertical: MeshSpace.sm),
+                  padding: const EdgeInsets.only(
+                    top: MeshSpace.sm,
+                    bottom: MeshSpace.md,
+                  ),
                   itemCount: visible.length,
                   itemBuilder: (context, i) {
-                    final m = visible[visible.length - 1 - i];
+                    final index = visible.length - 1 - i;
+                    final m = visible[index];
+                    final previous = index == 0 ? null : visible[index - 1];
                     final status = meshStatus.valueOrNull;
                     final reason = m.mine
                         ? queuedReasonFor(
@@ -560,7 +567,19 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                             nowMs: DateTime.now().millisecondsSinceEpoch,
                           )
                         : null;
-                    return _MessageBubble(
+                    // A burst from one author reads as a single turn: only the
+                    // first bubble carries an avatar and the extra top spacing.
+                    final grouped =
+                        previous != null &&
+                        previous.mine == m.mine &&
+                        previous.fromPeerId == m.fromPeerId &&
+                        m.atMs - previous.atMs <
+                            const Duration(minutes: 2).inMilliseconds;
+                    final newDay =
+                        previous == null ||
+                        _DaySeparator.label(previous.atMs, DateTime.now()) !=
+                            _DaySeparator.label(m.atMs, DateTime.now());
+                    final bubble = _MessageBubble(
                       text: m.text,
                       mine: m.mine,
                       sender: m.mine ? 'You' : (m.fromPeerId ?? 'Peer'),
@@ -568,7 +587,16 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                       deliveryState: m.mine ? m.state : null,
                       voice: m.voice,
                       eventId: m.eventId,
+                      atMs: m.atMs,
+                      grouped: grouped && !newDay,
                       player: _voicePlayer,
+                    );
+                    if (!newDay) return bubble;
+                    return Column(
+                      children: [
+                        _DaySeparator(atMs: m.atMs),
+                        bubble,
+                      ],
                     );
                   },
                 );
@@ -600,55 +628,104 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                 ),
               ),
             ),
-          Padding(
+          Container(
+            decoration: BoxDecoration(
+              color: palette.surface,
+              border: Border(top: BorderSide(color: palette.hairline)),
+            ),
             padding: const EdgeInsets.fromLTRB(
               MeshSpace.sm,
-              MeshSpace.xs,
+              MeshSpace.sm,
               MeshSpace.sm,
               MeshSpace.sm,
             ),
             child: SafeArea(
               top: false,
-              child: _recordingVoice
-                  ? _VoiceRecordingBar(
-                      elapsed: _voiceElapsed,
-                      cap: RoomVoiceRecorder.maxClip,
-                      onDiscard: _discardVoice,
-                      onStop: _toggleVoiceCapture,
-                    )
-                  : _pendingVoiceClip != null
-                  ? _PendingVoiceBar(
-                      clip: _pendingVoiceClip!,
-                      sending: _sendingVoice,
-                      onDiscard: _discardVoice,
-                      onSend: _sendPendingVoice,
-                    )
-                  : Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _textController,
-                            maxLength: policy.maxMessageBytes,
-                            minLines: 1,
-                            maxLines: 4,
-                            decoration: const InputDecoration(
-                              hintText: 'Message',
-                              counterText: '',
+              child: AnimatedSize(
+                duration: MeshMotion.standard,
+                curve: MeshMotion.easeOut,
+                alignment: Alignment.topCenter,
+                child: AnimatedSwitcher(
+                  duration: MeshMotion.standard,
+                  child: _recordingVoice
+                      ? _VoiceRecordingBar(
+                          key: const ValueKey('recording'),
+                          elapsed: _voiceElapsed,
+                          cap: RoomVoiceRecorder.maxClip,
+                          onDiscard: _discardVoice,
+                          onStop: _toggleVoiceCapture,
+                        )
+                      : _pendingVoiceClip != null
+                      ? _PendingVoiceBar(
+                          key: const ValueKey('pending'),
+                          clip: _pendingVoiceClip!,
+                          sending: _sendingVoice,
+                          onDiscard: _discardVoice,
+                          onSend: _sendPendingVoice,
+                        )
+                      : Row(
+                          key: const ValueKey('compose'),
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _textController,
+                                maxLength: policy.maxMessageBytes,
+                                minLines: 1,
+                                maxLines: 4,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                                  hintText: 'Message',
+                                  counterText: '',
+                                  isDense: true,
+                                  filled: true,
+                                  fillColor: palette.surfaceRaised,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: MeshSpace.md,
+                                    vertical: MeshSpace.sm + 2,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      MeshRadius.full,
+                                    ),
+                                    borderSide: BorderSide(
+                                      color: palette.hairline,
+                                    ),
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      MeshRadius.full,
+                                    ),
+                                    borderSide: BorderSide(
+                                      color: palette.hairline,
+                                    ),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      MeshRadius.full,
+                                    ),
+                                    borderSide: BorderSide(
+                                      color: palette.primary,
+                                      width: 1.5,
+                                    ),
+                                  ),
+                                ),
+                                onSubmitted: (_) => _send(),
+                              ),
                             ),
-                            onSubmitted: (_) => _send(),
-                          ),
+                            const SizedBox(width: MeshSpace.xs),
+                            _MicToggleButton(onTap: _toggleVoiceCapture),
+                            const SizedBox(width: MeshSpace.xs),
+                            IconButton.filled(
+                              tooltip: 'Send message',
+                              icon: const Icon(Icons.send_rounded),
+                              onPressed: _send,
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: MeshSpace.sm),
-                        _MicToggleButton(onTap: _toggleVoiceCapture),
-                        const SizedBox(width: MeshSpace.sm),
-                        IconButton.filled(
-                          tooltip: 'Send message',
-                          icon: const Icon(Icons.send_rounded),
-                          onPressed: _send,
-                        ),
-                      ],
-                    ),
+                ),
+              ),
             ),
           ),
         ],
@@ -679,6 +756,147 @@ class _QuickAction extends StatelessWidget {
   );
 }
 
+/// Voice-note waveform.
+///
+/// Bar heights come from a fixed pseudo-random profile keyed on bar index, so a
+/// clip looks like the same waveform every rebuild instead of jittering. While
+/// [active] the profile is modulated by a travelling phase, which reads as
+/// "audio is moving" during capture and playback; at rest the bars sit still at
+/// a damped height. [progress] fills bars up to that fraction with the solid
+/// [color] and leaves the remainder translucent, so the same widget serves as
+/// both a capture meter and a playback position indicator.
+class _VoiceWaveform extends StatefulWidget {
+  const _VoiceWaveform({
+    required this.active,
+    required this.color,
+    this.progress,
+    this.barCount = 22,
+    this.height = 24,
+  });
+
+  final bool active;
+  final Color color;
+  final double? progress;
+  final int barCount;
+  final double height;
+
+  @override
+  State<_VoiceWaveform> createState() => _VoiceWaveformState();
+}
+
+class _VoiceWaveformState extends State<_VoiceWaveform>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(_VoiceWaveform oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active == oldWidget.active) return;
+    if (widget.active) {
+      _controller.repeat();
+    } else {
+      // Settle to the resting profile instead of freezing mid-phase.
+      _controller.animateTo(0, duration: MeshMotion.standard);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => CustomPaint(
+        size: Size(double.infinity, widget.height),
+        painter: _WaveformPainter(
+          phase: _controller.value,
+          amplitude: widget.active ? 1 : 0.55,
+          color: widget.color,
+          barCount: widget.barCount,
+          progress: widget.progress,
+        ),
+      ),
+    ),
+  );
+}
+
+class _WaveformPainter extends CustomPainter {
+  _WaveformPainter({
+    required this.phase,
+    required this.amplitude,
+    required this.color,
+    required this.barCount,
+    required this.progress,
+  });
+
+  final double phase;
+  final double amplitude;
+  final Color color;
+  final int barCount;
+  final double? progress;
+
+  /// Deterministic 0..1 height profile. Two incommensurable sines give an
+  /// irregular, speech-like envelope without needing a random seed.
+  double _profile(int index) {
+    final a = math.sin(index * 1.9);
+    final b = math.sin(index * 0.7 + 1.3);
+    return 0.28 + 0.72 * (((a + b) / 2 + 1) / 2);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (barCount <= 0 || size.width <= 0) return;
+    const barWidth = 3.0;
+    final gap = math.max(
+      1.5,
+      (size.width - barCount * barWidth) / math.max(1, barCount - 1),
+    );
+    final usable = barCount * barWidth + (barCount - 1) * gap;
+    final left = (size.width - usable) / 2;
+    final centerY = size.height / 2;
+    final fillTo = progress == null ? barCount : (progress! * barCount);
+    final paint = Paint()..style = PaintingStyle.fill;
+    for (var i = 0; i < barCount; i++) {
+      final wobble = amplitude == 0
+          ? 1.0
+          : 0.62 + 0.38 * math.sin(phase * 2 * math.pi + i * 0.55);
+      final height =
+          (size.height * _profile(i) * (0.45 + 0.55 * amplitude) * wobble)
+              .clamp(3.0, size.height);
+      final x = left + i * (barWidth + gap);
+      paint.color = i < fillTo ? color : color.withValues(alpha: .3);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, centerY - height / 2, barWidth, height),
+          const Radius.circular(barWidth),
+        ),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter old) =>
+      old.phase != phase ||
+      old.amplitude != amplitude ||
+      old.color != color ||
+      old.barCount != barCount ||
+      old.progress != progress;
+}
+
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.text,
@@ -688,6 +906,8 @@ class _MessageBubble extends StatelessWidget {
     required this.deliveryState,
     required this.eventId,
     required this.player,
+    required this.atMs,
+    required this.grouped,
     this.voice,
   });
 
@@ -698,9 +918,22 @@ class _MessageBubble extends StatelessWidget {
   final RoomMessageState? deliveryState;
   final String eventId;
   final RoomVoicePlayer player;
+  final int atMs;
+
+  /// True when the previous bubble came from the same author moments earlier.
+  /// Grouped bubbles drop the avatar and tighten their spacing so a burst of
+  /// messages reads as one turn.
+  final bool grouped;
 
   /// Non-null when this bubble is a voice note rather than text.
   final RoomVoiceAttachment? voice;
+
+  static String _clock(int atMs) {
+    final at = DateTime.fromMillisecondsSinceEpoch(atMs);
+    final hour = at.hour.toString().padLeft(2, '0');
+    final minute = at.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -709,96 +942,262 @@ class _MessageBubble extends StatelessWidget {
     final structured = attachment == null
         ? _StructuredMessage.tryParse(text)
         : null;
-    final foreground = mine
-        ? palette.onPrimary
-        : Theme.of(context).colorScheme.onSurface;
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 330),
-        margin: const EdgeInsets.symmetric(
-          horizontal: MeshSpace.md,
-          vertical: MeshSpace.xs,
+    final foreground = mine ? palette.onPrimary : palette.text;
+    final radius = Radius.circular(MeshRadius.lg);
+    final bubble = Container(
+      constraints: BoxConstraints(
+        maxWidth: math.min(MediaQuery.sizeOf(context).width * .78, 340),
+      ),
+      padding: EdgeInsets.symmetric(
+        horizontal: MeshSpace.md,
+        vertical: attachment == null ? MeshSpace.sm + 2 : MeshSpace.sm,
+      ),
+      decoration: BoxDecoration(
+        color: mine ? palette.primary : palette.surface,
+        border: mine ? null : Border.all(color: palette.hairline),
+        borderRadius: BorderRadius.only(
+          topLeft: radius,
+          topRight: radius,
+          bottomLeft: mine ? radius : Radius.circular(MeshRadius.sm / 2),
+          bottomRight: mine ? Radius.circular(MeshRadius.sm / 2) : radius,
         ),
-        padding: const EdgeInsets.all(MeshSpace.md),
-        decoration: BoxDecoration(
-          color: mine
-              ? palette.primary
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(MeshRadius.md),
-            topRight: const Radius.circular(MeshRadius.md),
-            bottomLeft: Radius.circular(mine ? MeshRadius.md : MeshSpace.xs),
-            bottomRight: Radius.circular(mine ? MeshSpace.xs : MeshRadius.md),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (attachment != null)
-              _VoiceBubbleBody(
-                eventId: eventId,
-                voice: attachment,
-                foreground: foreground,
-                player: player,
-              )
-            else if (structured == null)
-              Text(text, style: TextStyle(color: foreground))
-            else
-              _StructuredMessageCard(
-                message: structured,
-                foreground: foreground,
-              ),
-            const SizedBox(height: MeshSpace.xs),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    reason ?? sender,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: foreground.withValues(alpha: .72),
-                    ),
+        boxShadow: Theme.of(context).brightness == Brightness.light
+            ? MeshShadows.resting
+            : null,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (attachment != null)
+            _VoiceBubbleBody(
+              eventId: eventId,
+              voice: attachment,
+              foreground: foreground,
+              accent: mine ? palette.onPrimary : palette.primary,
+              player: player,
+            )
+          else if (structured == null)
+            Text(text, style: TextStyle(color: foreground, height: 1.3))
+          else
+            _StructuredMessageCard(message: structured, foreground: foreground),
+          const SizedBox(height: MeshSpace.xs),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  reason ?? '$sender · ${_clock(atMs)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: foreground.withValues(alpha: .68),
+                    fontSize: 11,
                   ),
                 ),
-                if (deliveryState != null) ...[
-                  const SizedBox(width: MeshSpace.sm),
-                  _DeliveryStateIcon(state: deliveryState!),
-                ],
+              ),
+              if (deliveryState != null) ...[
+                const SizedBox(width: MeshSpace.sm),
+                AnimatedSwitcher(
+                  duration: MeshMotion.standard,
+                  child: _DeliveryStateIcon(
+                    key: ValueKey(deliveryState),
+                    state: deliveryState!,
+                  ),
+                ),
               ],
-            ),
+            ],
+          ),
+        ],
+      ),
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        MeshSpace.md,
+        grouped ? 1 : MeshSpace.sm,
+        MeshSpace.md,
+        1,
+      ),
+      child: Row(
+        mainAxisAlignment: mine
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (!mine) ...[
+            _SenderAvatar(name: sender, visible: !grouped),
+            const SizedBox(width: MeshSpace.sm),
           ],
+          Flexible(child: bubble),
+        ],
+      ),
+    );
+  }
+}
+
+/// Initial-letter avatar for incoming messages. Kept in the layout (invisible)
+/// when [visible] is false so grouped bubbles stay aligned with the first one.
+class _SenderAvatar extends StatelessWidget {
+  const _SenderAvatar({required this.name, required this.visible});
+
+  final String name;
+  final bool visible;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    final trimmed = name.trim();
+    final initial = trimmed.isEmpty
+        ? '?'
+        : String.fromCharCode(trimmed.runes.first);
+    return SizedBox(
+      width: 28,
+      height: 28,
+      child: visible
+          ? DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: palette.mesh.withValues(alpha: .18),
+                border: Border.all(color: palette.mesh.withValues(alpha: .35)),
+              ),
+              child: Center(
+                child: Text(
+                  initial.toUpperCase(),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: palette.mesh,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            )
+          : null,
+    );
+  }
+}
+
+/// Day divider between messages sent on different calendar days.
+class _DaySeparator extends StatelessWidget {
+  const _DaySeparator({required this.atMs});
+
+  final int atMs;
+
+  static const _months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+
+  static String label(int atMs, DateTime now) {
+    final at = DateTime.fromMillisecondsSinceEpoch(atMs);
+    final days = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).difference(DateTime(at.year, at.month, at.day)).inDays;
+    if (days == 0) return 'Today';
+    if (days == 1) return 'Yesterday';
+    return '${at.day} ${_months[at.month - 1]}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: MeshSpace.sm),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: MeshSpace.sm + 2,
+            vertical: 3,
+          ),
+          decoration: BoxDecoration(
+            color: palette.surfaceRaised,
+            border: Border.all(color: palette.hairline),
+            borderRadius: BorderRadius.circular(MeshRadius.full),
+          ),
+          child: Text(
+            label(atMs, DateTime.now()),
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(color: palette.textMuted),
+          ),
         ),
       ),
     );
   }
 }
 
-/// Playable body of a voice-note bubble: a play/stop control, the clip length,
-/// and a static waveform hint. Rebuilds only itself when playback starts or
-/// stops, via the shared player's [RoomVoicePlayer.playingEventId].
-class _VoiceBubbleBody extends StatelessWidget {
+/// Playable body of a voice-note bubble: a filled play/stop control, an
+/// animated waveform that fills as the clip plays, and the clip length.
+///
+/// The fill is driven by a local controller of the clip's own duration rather
+/// than by player position events: `RoomVoicePlayer` intentionally exposes only
+/// which clip is playing (so one bubble's rebuild never touches the list), and
+/// a voice note is a few seconds long, so a duration-timed sweep tracks it
+/// closely and resets cleanly on stop or completion.
+class _VoiceBubbleBody extends StatefulWidget {
   const _VoiceBubbleBody({
     required this.eventId,
     required this.voice,
     required this.foreground,
+    required this.accent,
     required this.player,
   });
 
   final String eventId;
   final RoomVoiceAttachment voice;
   final Color foreground;
+  final Color accent;
   final RoomVoicePlayer player;
 
   @override
+  State<_VoiceBubbleBody> createState() => _VoiceBubbleBodyState();
+}
+
+class _VoiceBubbleBodyState extends State<_VoiceBubbleBody>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _sweep = AnimationController(
+    vsync: this,
+    duration: widget.voice.duration,
+  );
+
+  @override
+  void dispose() {
+    _sweep.dispose();
+    super.dispose();
+  }
+
+  void _syncSweep(bool playing) {
+    if (playing) {
+      if (!_sweep.isAnimating && _sweep.value < 1) {
+        _sweep.forward(from: _sweep.value == 1 ? 0 : _sweep.value);
+      }
+    } else if (_sweep.value != 0) {
+      _sweep
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final seconds = (voice.durationMs / 1000).toStringAsFixed(1);
+    final seconds = (widget.voice.durationMs / 1000).toStringAsFixed(1);
     return ValueListenableBuilder<String?>(
-      valueListenable: player.playingEventId,
+      valueListenable: widget.player.playingEventId,
       builder: (context, playingEventId, _) {
-        final playing = playingEventId == eventId;
+        final playing = playingEventId == widget.eventId;
+        // Playback state changes outside this build; reconcile after it.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _syncSweep(playing);
+        });
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -807,26 +1206,56 @@ class _VoiceBubbleBody extends StatelessWidget {
               label: playing
                   ? 'Stop voice note'
                   : 'Play $seconds second voice note',
-              child: IconButton(
-                iconSize: 22,
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-                color: foreground,
-                tooltip: playing ? 'Stop' : 'Play voice note',
-                icon: Icon(
-                  playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(MeshRadius.full),
+                onTap: () =>
+                    widget.player.toggle(widget.eventId, widget.voice.audio),
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: widget.accent.withValues(alpha: .16),
+                    border: Border.all(
+                      color: widget.accent.withValues(alpha: .38),
+                    ),
+                  ),
+                  child: Center(
+                    child: AnimatedSwitcher(
+                      duration: MeshMotion.quick,
+                      child: Icon(
+                        playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                        key: ValueKey(playing),
+                        size: 22,
+                        color: widget.accent,
+                      ),
+                    ),
+                  ),
                 ),
-                onPressed: () => player.toggle(eventId, voice.audio),
               ),
             ),
-            const SizedBox(width: MeshSpace.xs),
-            Icon(
-              Icons.graphic_eq,
-              size: 18,
-              color: foreground.withValues(alpha: .72),
+            const SizedBox(width: MeshSpace.sm),
+            SizedBox(
+              width: 116,
+              child: AnimatedBuilder(
+                animation: _sweep,
+                builder: (context, _) => _VoiceWaveform(
+                  active: playing,
+                  color: widget.foreground,
+                  barCount: 18,
+                  height: 26,
+                  progress: playing ? _sweep.value : null,
+                ),
+              ),
             ),
             const SizedBox(width: MeshSpace.sm),
-            Text('${seconds}s voice note', style: TextStyle(color: foreground)),
+            Text(
+              '${seconds}s',
+              style: TextStyle(
+                color: widget.foreground,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
           ],
         );
       },
@@ -859,6 +1288,7 @@ class _MicToggleButton extends StatelessWidget {
 /// following [_PendingVoiceBar] requires the user to explicitly send.
 class _VoiceRecordingBar extends StatelessWidget {
   const _VoiceRecordingBar({
+    super.key,
     required this.elapsed,
     required this.cap,
     required this.onDiscard,
@@ -882,44 +1312,96 @@ class _VoiceRecordingBar extends StatelessWidget {
       label:
           'Recording voice note, '
           '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)} seconds',
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: 'Discard recording',
-            icon: const Icon(Icons.delete_outline),
-            onPressed: () => unawaited(onDiscard()),
-          ),
-          IconButton.filled(
-            tooltip: 'Stop recording',
-            icon: const Icon(Icons.mic),
-            onPressed: () => unawaited(onStop()),
-          ),
-          const SizedBox(width: MeshSpace.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)}s · '
-                  '${(remaining.inMilliseconds / 1000).clamp(0, 99).toStringAsFixed(1)}s left',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: MeshSpace.xs),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(MeshRadius.md),
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    minHeight: 4,
-                    color: palette.ember,
-                  ),
-                ),
-              ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: MeshSpace.sm,
+          vertical: MeshSpace.sm,
+        ),
+        decoration: BoxDecoration(
+          color: palette.ember.withValues(alpha: .08),
+          border: Border.all(color: palette.ember.withValues(alpha: .35)),
+          borderRadius: BorderRadius.circular(MeshRadius.lg),
+        ),
+        child: Row(
+          children: [
+            IconButton(
+              tooltip: 'Discard recording',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => unawaited(onDiscard()),
             ),
-          ),
-        ],
+            _PulsingDot(color: palette.ember),
+            const SizedBox(width: MeshSpace.sm),
+            Expanded(
+              child: _VoiceWaveform(
+                active: true,
+                color: palette.ember,
+                barCount: 26,
+                height: 26,
+                progress: progress,
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            Text(
+              '${(remaining.inMilliseconds / 1000).clamp(0, 99).toStringAsFixed(1)}s',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: palette.ember,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            IconButton.filled(
+              tooltip: 'Stop recording',
+              icon: const Icon(Icons.stop_rounded),
+              onPressed: () => unawaited(onStop()),
+            ),
+          ],
+        ),
       ),
     );
   }
+}
+
+/// Slow breathing dot that marks "the microphone is live right now". Motion,
+/// not just color, so the state is legible without relying on red alone.
+class _PulsingDot extends StatefulWidget {
+  const _PulsingDot({required this.color});
+
+  final Color color;
+
+  @override
+  State<_PulsingDot> createState() => _PulsingDotState();
+}
+
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final t = Curves.easeInOut.transform(_controller.value);
+        return Container(
+          width: 12 + 4 * t,
+          height: 12 + 4 * t,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: widget.color.withValues(alpha: .55 + .45 * t),
+          ),
+        );
+      },
+    ),
+  );
 }
 
 /// Composer state after the microphone has been stopped. The clip is local and
@@ -927,6 +1409,7 @@ class _VoiceRecordingBar extends StatelessWidget {
 /// they decide not to deliver it.
 class _PendingVoiceBar extends StatelessWidget {
   const _PendingVoiceBar({
+    super.key,
     required this.clip,
     required this.sending,
     required this.onDiscard,
@@ -940,37 +1423,58 @@ class _PendingVoiceBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
     final seconds = (clip.durationMs / 1000).toStringAsFixed(1);
     return Semantics(
       liveRegion: true,
       label: 'Voice note recorded, $seconds seconds. Tap Send to deliver it.',
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: 'Discard voice note',
-            icon: const Icon(Icons.delete_outline),
-            onPressed: sending ? null : () => unawaited(onDiscard()),
-          ),
-          const Icon(Icons.graphic_eq),
-          const SizedBox(width: MeshSpace.sm),
-          Expanded(
-            child: Text(
-              '$seconds s voice note ready',
-              style: Theme.of(context).textTheme.bodyMedium,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: MeshSpace.sm,
+          vertical: MeshSpace.sm,
+        ),
+        decoration: BoxDecoration(
+          color: palette.surfaceRaised,
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(MeshRadius.lg),
+        ),
+        child: Row(
+          children: [
+            IconButton(
+              tooltip: 'Discard voice note',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: sending ? null : () => unawaited(onDiscard()),
             ),
-          ),
-          IconButton.filled(
-            tooltip: 'Send voice note',
-            icon: sending
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.send_rounded),
-            onPressed: sending ? null : () => unawaited(onSend()),
-          ),
-        ],
+            Expanded(
+              child: _VoiceWaveform(
+                active: false,
+                color: palette.primary,
+                barCount: 24,
+                height: 26,
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            Text(
+              '${seconds}s ready',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: palette.textMuted,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            IconButton.filled(
+              tooltip: 'Send voice note',
+              icon: sending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.send_rounded),
+              onPressed: sending ? null : () => unawaited(onSend()),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1163,7 +1667,7 @@ class _MeshStatusBar extends StatelessWidget {
 }
 
 class _DeliveryStateIcon extends StatelessWidget {
-  const _DeliveryStateIcon({required this.state});
+  const _DeliveryStateIcon({super.key, required this.state});
 
   final RoomMessageState state;
 
