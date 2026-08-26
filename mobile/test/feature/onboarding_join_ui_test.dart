@@ -9,11 +9,17 @@ import 'package:meshsetu_mobile/feature/join/join_screen.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_profile.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_repository.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_screen.dart';
+import 'package:meshsetu_mobile/feature/stt/stt_model_manager.dart';
 import 'package:meshsetu_mobile/ui/theme/mesh_theme.dart';
 
 Widget _app(Widget child, {List<Override> overrides = const []}) =>
     ProviderScope(
-      overrides: overrides,
+      overrides: [
+        sttModelManagerProvider.overrideWithValue(
+          SttModelManager(manifests: const {}),
+        ),
+        ...overrides,
+      ],
       child: MaterialApp(theme: MeshTheme.light(), home: child),
     );
 
@@ -113,11 +119,19 @@ void main() {
       expect(find.textContaining('encrypted'), findsNothing);
       expect(find.textContaining('responders'), findsNothing);
       expect(find.text('Your details'), findsOneWidget);
-      expect(find.byType(TextField), findsNWidgets(3));
+      expect(find.byType(TextField), findsNWidgets(2));
+      expect(
+        find.byKey(const Key('preferred-language-dropdown')),
+        findsOneWidget,
+      );
 
       await tester.enterText(find.byType(TextField).at(0), 'Asha Patel');
       await tester.enterText(find.byType(TextField).at(1), '+919876543210');
-      await tester.enterText(find.byType(TextField).at(2), 'English');
+      await tester.tap(find.byKey(const Key('preferred-language-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hindi').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Hindi ready to be sent via voice.'), findsOneWidget);
       await _tapOnboardingButton(tester, 'Continue');
 
       expect(find.text('STEP 2 OF 3'), findsOneWidget);
@@ -135,6 +149,7 @@ void main() {
 
       await _tapOnboardingButton(tester, 'Save emergency profile');
       expect(storage.value, isNotNull);
+      expect(storage.value, contains('"language":"Hindi"'));
     });
 
     testWidgets('validates a contact number before advancing', (tester) async {
@@ -151,7 +166,6 @@ void main() {
 
       await tester.enterText(find.byType(TextField).at(0), 'Asha Patel');
       await tester.enterText(find.byType(TextField).at(1), '+919876543210');
-      await tester.enterText(find.byType(TextField).at(2), 'English');
       await _tapOnboardingButton(tester, 'Continue');
 
       await tester.enterText(find.byType(TextField).at(0), 'Ravi Patel');
@@ -186,6 +200,9 @@ void main() {
             onboardingRepositoryProvider.overrideWithValue(
               OnboardingRepository(storage),
             ),
+            sttModelManagerProvider.overrideWithValue(
+              SttModelManager(manifests: const {}),
+            ),
           ],
           child: MaterialApp(
             home: const OnboardingScreen(requireGestureEnrollment: true),
@@ -196,7 +213,6 @@ void main() {
 
       await tester.enterText(find.byType(TextField).at(0), 'Asha Patel');
       await tester.enterText(find.byType(TextField).at(1), '+919876543210');
-      await tester.enterText(find.byType(TextField).at(2), 'English');
       await _tapOnboardingButton(tester, 'Continue');
 
       await tester.enterText(find.byType(TextField).at(0), 'Ravi Patel');

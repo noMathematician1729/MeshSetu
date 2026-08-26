@@ -16,12 +16,13 @@ final class FakeOfflineSttEngine implements OfflineSttEngine {
   final String modelId;
 
   @override
-  Future<void> warmUp() async {}
+  Future<void> warmUp({SttLanguage language = SttLanguage.english}) async {}
 
   @override
   Future<SttResult> transcribe(
     Uint8List pcm16le, {
     int sampleRateHz = 16000,
+    SttLanguage language = SttLanguage.english,
   }) async {
     if (pcm16le.isEmpty) {
       throw StateError('fake STT received empty PCM input');
