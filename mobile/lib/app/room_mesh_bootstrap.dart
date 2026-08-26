@@ -58,6 +58,12 @@ abstract final class RoomMeshBootstrap {
     required WidgetRef ref,
     required String siteId,
   }) async {
+    // Room screens call this from `initState`, and `_ensureBridge` writes to
+    // `meshBridgeClientProvider`. Riverpod forbids modifying a provider during
+    // a widget lifecycle callback, so yield first: a microtask runs after the
+    // synchronous build/initState phase has finished, which makes the write
+    // legal without changing when the bridge becomes available in practice.
+    await Future<void>.microtask(() {});
     final bridge = _ensureBridge(ref);
     bridge.prepareForSite(siteId: siteId);
     bool running;
