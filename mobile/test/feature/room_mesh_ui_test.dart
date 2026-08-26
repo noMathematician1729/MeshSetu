@@ -103,6 +103,7 @@ void main() {
         ),
       ],
     );
+
     addTearDown(container.dispose);
     addTearDown(database.close);
     container.read(gatewayEnabledProvider.notifier).state = false;
@@ -114,5 +115,34 @@ void main() {
     expect(find.byIcon(Icons.bluetooth_connected), findsOneWidget);
     expect(find.text('Cloud: disabled'), findsOneWidget);
     expect(find.text('Event mode is off — messages will queue.'), findsNothing);
+  });
+
+  testWidgets('room composer starts with a tap-to-record mic and send button', (
+    tester,
+  ) async {
+    final database = MeshDatabase.forTesting(NativeDatabase.memory());
+    final onboarding = await _onboardingRepository();
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWithValue(database),
+        onboardingRepositoryProvider.overrideWithValue(onboarding),
+        meshStatusProvider.overrideWith(
+          (ref) => Stream.value(MeshStatus.stopped),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(database.close);
+    container.read(gatewayEnabledProvider.notifier).state = false;
+
+    await tester.pumpWidget(_roomApp(container));
+    await tester.pump();
+
+    // Voice delivery is intentionally not bound to pointer-up: one tap starts
+    // capture, then the recording state exposes a second mic tap to stop, and
+    // only the send control delivers the resulting pending clip.
+    expect(find.byTooltip('Start voice recording'), findsOneWidget);
+    expect(find.byTooltip('Send message'), findsOneWidget);
+    expect(find.textContaining('Hold to record'), findsNothing);
   });
 }

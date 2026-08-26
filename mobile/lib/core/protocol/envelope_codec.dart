@@ -73,6 +73,7 @@ abstract final class EnvelopeCodec {
         model.PayloadType.responderUpdate => pb.PayloadType.RESPONDER_UPDATE,
         model.PayloadType.beaconObservation =>
           pb.PayloadType.BEACON_OBSERVATION,
+        model.PayloadType.roomVoice => pb.PayloadType.ROOM_VOICE,
       };
 
   static model.PayloadType _payloadTypeToModel(pb.PayloadType value) =>
@@ -85,6 +86,7 @@ abstract final class EnvelopeCodec {
         pb.PayloadType.RESPONDER_UPDATE => model.PayloadType.responderUpdate,
         pb.PayloadType.BEACON_OBSERVATION =>
           model.PayloadType.beaconObservation,
+        pb.PayloadType.ROOM_VOICE => model.PayloadType.roomVoice,
         _ => throw StateError('unsupported payload type'),
       };
 }

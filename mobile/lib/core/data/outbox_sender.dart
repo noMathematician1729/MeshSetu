@@ -204,6 +204,10 @@ class OutboxSender {
         PayloadType.responderUpdate => PriorityBand.p1High,
         PayloadType.voiceManifest ||
         PayloadType.voiceObject => PriorityBand.p2Normal,
+        // Bulk band so a multi-kilobyte voice note is preempted mid-transfer
+        // by room text and SOS traffic (`MeshTransportCoordinator` checks
+        // `hasHigherPriorityThan` between frame writes).
+        PayloadType.roomVoice => PriorityBand.p3Bulk,
         _ => PriorityBand.p2Normal,
       };
 
