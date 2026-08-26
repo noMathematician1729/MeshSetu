@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'room_presence.dart';
 
@@ -41,10 +42,50 @@ abstract interface class LiveRoomMessageTransport {
   });
 }
 
+/// A voice note delivered over the live socket. The audio arrives as raw
+/// bytes; `RoomRepository.storeSocketVoiceMessage` re-frames it into an
+/// authenticated packet before it is persisted.
+class LiveRoomVoice {
+  const LiveRoomVoice({
+    required this.messageId,
+    required this.audio,
+    required this.durationMs,
+    required this.memberId,
+    required this.displayName,
+    required this.sentAtMs,
+  });
+
+  final String messageId;
+  final Uint8List audio;
+  final int durationMs;
+  final String memberId;
+  final String displayName;
+  final int sentAtMs;
+}
+
+/// A transport `RoomMessageDispatcher` can attempt a room *voice note* over
+/// before falling back to the durable mesh outbox.
+///
+/// Deliberately separate from [LiveRoomMessageTransport] rather than an
+/// addition to it: existing fakes implement the text interface, and widening
+/// it would force every one of them to grow an audio method they don't use.
+/// [RoomPresenceSocket] implements both.
+abstract interface class LiveRoomVoiceTransport
+    implements LiveRoomMessageTransport {
+  /// Sends [audio] over the live channel and resolves `true` only once the
+  /// server confirms at least one other member received it.
+  Future<bool> sendRoomVoice({
+    required String messageId,
+    required Uint8List audio,
+    required int durationMs,
+  });
+}
+
 /// Live room membership shared through the event backend. Mesh announcements
 /// remain durable/offline fallback; this channel makes open lobbies update
 /// immediately when a participant joins or leaves.
-class RoomPresenceSocket implements LiveRoomMessageTransport {
+class RoomPresenceSocket
+    implements LiveRoomMessageTransport, LiveRoomVoiceTransport {
   RoomPresenceSocket({
     required this.baseUrl,
     required this.gatewayKey,
@@ -69,6 +110,7 @@ class RoomPresenceSocket implements LiveRoomMessageTransport {
 
   final _members = StreamController<List<RoomMember>>.broadcast();
   final _messages = StreamController<LiveRoomMessage>.broadcast();
+  final _voice = StreamController<LiveRoomVoice>.broadcast();
   final _debug = StreamController<String>.broadcast();
   final _pendingMessages = <Map<String, Object?>>[];
   final Map<String, Completer<int>> _pendingAcks = {};
@@ -80,6 +122,9 @@ class RoomPresenceSocket implements LiveRoomMessageTransport {
 
   Stream<List<RoomMember>> get members => _members.stream;
   Stream<LiveRoomMessage> get messages => _messages.stream;
+
+  /// Voice notes pushed by other members of this room.
+  Stream<LiveRoomVoice> get voiceMessages => _voice.stream;
   Stream<String> get debug => _debug.stream;
 
   @override
@@ -175,7 +220,48 @@ class RoomPresenceSocket implements LiveRoomMessageTransport {
         }
         return;
       }
-      if (decoded['type'] == 'room-message-accepted') {
+      if (decoded['type'] == 'room-voice') {
+        final data = decoded['data'];
+        if (data is! Map) return;
+        final item = data.cast<String, Object?>();
+        final messageId = item['messageId'] as String?;
+        final encodedAudio = item['audio'] as String?;
+        final durationMs = (item['durationMs'] as num?)?.toInt();
+        final memberId = item['memberId'] as String?;
+        final displayName = item['displayName'] as String?;
+        final sentAtMs = (item['sentAtMs'] as num?)?.toInt();
+        if (messageId == null ||
+            encodedAudio == null ||
+            durationMs == null ||
+            memberId == null ||
+            displayName == null ||
+            sentAtMs == null) {
+          return;
+        }
+        final Uint8List audio;
+        try {
+          audio = base64Decode(encodedAudio);
+        } on FormatException {
+          return;
+        }
+        if (audio.isEmpty) return;
+        if (!_disposed) {
+          _voice.add(
+            LiveRoomVoice(
+              messageId: messageId,
+              audio: audio,
+              durationMs: durationMs,
+              memberId: memberId,
+              displayName: displayName,
+              sentAtMs: sentAtMs,
+            ),
+          );
+          _report('Received live voice note from $displayName.');
+        }
+        return;
+      }
+      if (decoded['type'] == 'room-message-accepted' ||
+          decoded['type'] == 'room-voice-accepted') {
         final data = decoded['data'];
         if (data is! Map) return;
         final item = data.cast<String, Object?>();
@@ -238,6 +324,41 @@ class RoomPresenceSocket implements LiveRoomMessageTransport {
     }
   }
 
+  @override
+  Future<bool> sendRoomVoice({
+    required String messageId,
+    required Uint8List audio,
+    required int durationMs,
+  }) async {
+    final message = <String, Object?>{
+      'type': 'room-voice',
+      'messageId': messageId,
+      'audio': base64Encode(audio),
+      'durationMs': durationMs,
+      'sentAtMs': DateTime.now().millisecondsSinceEpoch,
+    };
+    final socket = _socket;
+    if (socket == null) {
+      // Not queued for replay: unlike text, a voice note already has a
+      // durable outbox row waiting to go out over the mesh, and replaying it
+      // on reconnect would deliver the same clip twice.
+      _report('Live chat offline; voice note goes to the mesh.');
+      return false;
+    }
+    final ack = _pendingAcks[messageId] ??= Completer<int>();
+    socket.add(jsonEncode(message));
+    _report('Sent voice note to live room.');
+    try {
+      final recipientCount = await ack.future.timeout(messageAckTimeout);
+      return recipientCount > 0;
+    } on TimeoutException {
+      _report('No live-room acknowledgement; falling back to mesh.');
+      return false;
+    } finally {
+      _pendingAcks.remove(messageId);
+    }
+  }
+
   void _report(String value) {
     if (!_disposed) _debug.add(value);
   }
@@ -262,6 +383,7 @@ class RoomPresenceSocket implements LiveRoomMessageTransport {
     _socket = null;
     await _members.close();
     await _messages.close();
+    await _voice.close();
     await _debug.close();
   }
 }

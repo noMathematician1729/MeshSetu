@@ -203,6 +203,15 @@ void main() {
         expect(find.text('Mesh active · waiting for a peer'), findsOneWidget);
         expect(find.textContaining('No connected mesh peers'), findsOneWidget);
         expect(find.text('Emergency mesh delivery confirmed'), findsNothing);
+
+        // `mesh` is a single-subscription controller and the StreamBuilder is
+        // still listening. `addTearDown(mesh.close)` would then wait forever
+        // for its done event to be delivered — tearDown runs outside the pump
+        // loop, so nothing ever dispatches it and the test hangs until the
+        // 10-minute framework timeout. Unmount first, exactly as the
+        // 'renders a delivery panel' test above does.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 1));
       },
     );
 

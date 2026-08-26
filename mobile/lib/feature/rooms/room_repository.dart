@@ -12,6 +12,7 @@ import '../../core/model/model.dart';
 import 'room_message_packet.dart';
 import 'room_policy.dart';
 import 'room_presence.dart';
+import 'room_voice_packet.dart';
 
 const _uuid = Uuid();
 
@@ -74,6 +75,19 @@ String? queuedReasonFor(
   return 'Waiting to relay over Bluetooth.';
 }
 
+/// Audio attached to a [RoomMessage] that is a push-to-talk voice note
+/// rather than text. Decoded from a `PayloadType.roomVoice` payload by
+/// [RoomVoicePacketCodec], so the bytes have already passed the packet HMAC
+/// (and, for mesh-delivered clips, the envelope's AES-GCM check before that).
+class RoomVoiceAttachment {
+  const RoomVoiceAttachment({required this.audio, required this.durationMs});
+
+  final Uint8List audio;
+  final int durationMs;
+
+  Duration get duration => Duration(milliseconds: durationMs);
+}
+
 class RoomMessage {
   const RoomMessage({
     required this.eventId,
@@ -83,6 +97,7 @@ class RoomMessage {
     required this.mine,
     this.state = RoomMessageState.delivered,
     this.queuedSinceMs,
+    this.voice,
   });
 
   final String eventId;
@@ -90,6 +105,12 @@ class RoomMessage {
   final String? fromPeerId;
   final int atMs;
   final bool mine;
+
+  /// Non-null when this message is a voice note. [text] is empty in that
+  /// case; the two are mutually exclusive.
+  final RoomVoiceAttachment? voice;
+
+  bool get isVoice => voice != null;
 
   /// Only meaningful when [mine] is true; a received message is always
   /// [RoomMessageState.delivered] because its presence in the inbox already
@@ -194,6 +215,79 @@ class RoomRepository {
     return eventId;
   }
 
+  /// Queues a push-to-talk voice note as a `PayloadType.roomVoice` outbox row.
+  ///
+  /// Mirrors [sendMessage] — same ACL check, same durable row, same
+  /// `initialState` handshake with `RoomMessageDispatcher` — but the payload is
+  /// a [RoomVoicePacketCodec] packet and `rawText` stays null so the message
+  /// renders as audio rather than an empty bubble.
+  ///
+  /// [ttlSeconds] defaults to the room's own TTL. Throws [StateError] when the
+  /// caller may not post in this room, or when the clip is outside the limits
+  /// the packet format and transport allow.
+  Future<String> sendVoiceMessage({
+    required RoomPolicy policy,
+    required Set<String> userRoles,
+    required Uint8List audio,
+    required int durationMs,
+    String initialState = meshReadyState,
+    int? ttlSeconds,
+  }) async {
+    if (!canSend(policy, userRoles)) {
+      throw StateError('not authorized to send in ${policy.roomId}');
+    }
+    if (audio.isEmpty) throw StateError('voice note has no audio');
+    if (audio.length > RoomVoicePacketCodec.maxAudioBytes) {
+      throw StateError(
+        'voice note is ${audio.length} bytes; the limit is '
+        '${RoomVoicePacketCodec.maxAudioBytes}',
+      );
+    }
+    if (durationMs < 1 || durationMs > RoomVoicePacketCodec.maxDurationMs) {
+      throw StateError(
+        'voice note must be 1..${RoomVoicePacketCodec.maxDurationMs}ms',
+      );
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final eventId = _uuid.v4();
+    String? senderName;
+    try {
+      final rawName = await localDisplayName?.call();
+      if (rawName != null && rawName.trim().isNotEmpty) {
+        senderName = rawName.trim();
+      }
+    } catch (_) {
+      // Profile load failure — send without a name rather than blocking.
+    }
+    final packet = RoomVoicePacketCodec.encode(
+      siteId: siteId,
+      roomId: policy.roomId,
+      eventId: eventId,
+      audio: audio,
+      durationMs: durationMs,
+      senderName: senderName,
+    );
+    await _db
+        .into(_db.outboxEvents)
+        .insert(
+          OutboxEventsCompanion.insert(
+            eventId: eventId,
+            objectId: Value(_randomObjectId()),
+            siteId: siteId,
+            roomId: policy.roomId,
+            payloadType: PayloadType.roomVoice.name,
+            inputMode: Value(InputMode.voice.name),
+            priority: PriorityBand.p3Bulk.name,
+            payload: Value(packet),
+            state: Value(initialState),
+            createdAtMs: now,
+            updatedAtMs: now,
+            expiresAtMs: now + (ttlSeconds ?? policy.ttlSeconds) * 1000,
+          ),
+        );
+    return eventId;
+  }
+
   /// Marks a [socketPendingState] row as delivered without ever entering the
   /// mesh outbox — the internet socket already confirmed a remote member
   /// received it, so a GATT send would be redundant.
@@ -238,6 +332,43 @@ class RoomRepository {
         roomId: roomId,
         payloadType: PayloadType.roomMessage.name,
         payload: Uint8List.fromList(utf8.encode(text)),
+        peerId: fromPeerId,
+        receivedAtMs: sentAtMs,
+      ),
+    );
+  }
+
+  /// Persists a voice note that arrived over the live internet socket.
+  ///
+  /// The audio is re-framed into a [RoomVoicePacketCodec] packet locally
+  /// rather than stored raw, so [watch] has exactly one decode path for voice
+  /// regardless of whether a clip came from the socket or the mesh. Re-framing
+  /// is possible because the packet HMAC is keyed on the shared site key, which
+  /// this device already has.
+  Future<void> storeSocketVoiceMessage({
+    required String roomId,
+    required String eventId,
+    required Uint8List audio,
+    required int durationMs,
+    required String fromPeerId,
+    required int sentAtMs,
+  }) async {
+    final packet = RoomVoicePacketCodec.encode(
+      siteId: siteId,
+      roomId: roomId,
+      eventId: eventId,
+      audio: audio,
+      durationMs: durationMs.clamp(1, RoomVoicePacketCodec.maxDurationMs),
+      senderName: fromPeerId,
+    );
+    await _db.insertInbox(
+      InboxEventsCompanion.insert(
+        objectId: Value(_objectIdForEventId(eventId)),
+        eventId: eventId,
+        siteId: siteId,
+        roomId: roomId,
+        payloadType: PayloadType.roomVoice.name,
+        payload: packet,
         peerId: fromPeerId,
         receivedAtMs: sentAtMs,
       ),
@@ -313,14 +444,25 @@ class RoomRepository {
                     (t) => t.siteId.equals(siteId) & t.roomId.equals(roomId),
                   ))
                   .get();
-          final messages = [
-            for (final r in sentRows)
-              if (r.payloadType == PayloadType.roomMessage.name)
-                _mineMessageFromRow(r),
-            for (final r in receivedRows)
-              if (r.payloadType == PayloadType.roomMessage.name)
-                if (_decodeMessage(r) case final message?) message,
-          ]..sort((a, b) => a.atMs.compareTo(b.atMs));
+          final messages = <RoomMessage>[];
+          for (final r in sentRows) {
+            if (r.payloadType == PayloadType.roomMessage.name) {
+              messages.add(_mineMessageFromRow(r));
+            } else if (r.payloadType == PayloadType.roomVoice.name) {
+              final voice = _mineVoiceFromRow(r);
+              if (voice != null) messages.add(voice);
+            }
+          }
+          for (final r in receivedRows) {
+            if (r.payloadType == PayloadType.roomMessage.name) {
+              final message = _decodeMessage(r);
+              if (message != null) messages.add(message);
+            } else if (r.payloadType == PayloadType.roomVoice.name) {
+              final voice = _decodeVoice(r);
+              if (voice != null) messages.add(voice);
+            }
+          }
+          messages.sort((a, b) => a.atMs.compareTo(b.atMs));
           if (!closed) controller.add(messages);
         } finally {
           loading = false;
@@ -444,6 +586,78 @@ class RoomRepository {
           ? row.updatedAtMs
           : null,
     );
+  }
+
+  /// Decodes a voice note this device sent. Returns null when the row has no
+  /// payload yet or the packet cannot be authenticated — a corrupt local row
+  /// should not render as a broken bubble.
+  RoomMessage? _mineVoiceFromRow(OutboxEvent row) {
+    final payload = row.payload;
+    if (payload == null) return null;
+    final content = _decodeVoicePacket(
+      roomId: row.roomId,
+      eventId: row.eventId,
+      payload: Uint8List.fromList(payload),
+    );
+    if (content == null) return null;
+    final state = _stateFromOutboxState(row.state);
+    return RoomMessage(
+      eventId: row.eventId,
+      text: '',
+      fromPeerId: null,
+      atMs: row.createdAtMs,
+      mine: true,
+      state: state,
+      queuedSinceMs:
+          state == RoomMessageState.queued || state == RoomMessageState.sending
+          ? row.updatedAtMs
+          : null,
+      voice: RoomVoiceAttachment(
+        audio: content.audio,
+        durationMs: content.durationMs,
+      ),
+    );
+  }
+
+  /// Decodes a received voice note. Returns null for any packet that fails
+  /// authentication, so tampered audio never reaches the player.
+  RoomMessage? _decodeVoice(InboxEvent row) {
+    final content = _decodeVoicePacket(
+      roomId: row.roomId,
+      eventId: row.eventId,
+      payload: row.payload,
+    );
+    if (content == null) return null;
+    return RoomMessage(
+      eventId: row.eventId,
+      text: '',
+      fromPeerId: content.senderName.isNotEmpty
+          ? content.senderName
+          : row.peerId,
+      atMs: row.receivedAtMs,
+      mine: false,
+      voice: RoomVoiceAttachment(
+        audio: content.audio,
+        durationMs: content.durationMs,
+      ),
+    );
+  }
+
+  RoomVoiceContent? _decodeVoicePacket({
+    required String roomId,
+    required String eventId,
+    required Uint8List payload,
+  }) {
+    try {
+      return RoomVoicePacketCodec.decode(
+        siteId: siteId,
+        roomId: roomId,
+        eventId: eventId,
+        packet: payload,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   RoomMessage? _decodeMessage(InboxEvent row) {

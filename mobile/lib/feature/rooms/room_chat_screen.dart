@@ -17,6 +17,10 @@ import 'room_lobby_screen.dart';
 import 'room_policy.dart';
 import 'room_presence_socket.dart';
 import 'room_repository.dart';
+import 'room_voice_capacity.dart';
+import 'room_voice_packet.dart';
+import 'room_voice_player.dart';
+import 'room_voice_recorder.dart';
 
 class RoomChatScreen extends ConsumerStatefulWidget {
   const RoomChatScreen({
@@ -36,6 +40,12 @@ class RoomChatScreen extends ConsumerStatefulWidget {
 class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     with WidgetsBindingObserver {
   final _textController = TextEditingController();
+  final _voicePlayer = RoomVoicePlayer();
+  RoomVoiceRecorder? _voiceRecorder;
+  Timer? _voiceTicker;
+  Duration _voiceElapsed = Duration.zero;
+  bool _recordingVoice = false;
+  bool _sendingVoice = false;
   RoomPresenceSocket? _liveTransport;
   String _liveStatus = 'Connecting…';
   String? _error;
@@ -136,6 +146,21 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
             ),
       );
     });
+    socket.voiceMessages.listen((voice) {
+      if (!mounted || voice.memberId == profile.profileId) return;
+      unawaited(
+        ref
+            .read(roomRepositoryProvider(widget.siteId))
+            .storeSocketVoiceMessage(
+              roomId: widget.roomId,
+              eventId: voice.messageId,
+              audio: voice.audio,
+              durationMs: voice.durationMs,
+              fromPeerId: voice.displayName,
+              sentAtMs: voice.sentAtMs,
+            ),
+      );
+    });
     socket.start();
   }
 
@@ -145,6 +170,11 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
     // Room is no longer visible — re-enable notifications for it.
     _activeRoomReporter.reportInactive();
     _textController.dispose();
+    _voiceTicker?.cancel();
+    _voiceTicker = null;
+    unawaited(_voiceRecorder?.dispose());
+    _voiceRecorder = null;
+    unawaited(_voicePlayer.dispose());
     unawaited(_liveTransport?.dispose());
     super.dispose();
   }
@@ -163,6 +193,153 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
       setState(() => _error = null);
     } on StateError catch (e) {
       setState(() => _error = e.message);
+    }
+  }
+
+  /// Negotiated MTUs of the peers currently connected, used to decide whether
+  /// a voice note can physically cross the link before one is recorded.
+  Iterable<int> get _connectedPeerMtus {
+    final status = ref.read(meshStatusProvider).valueOrNull;
+    if (status == null) return const <int>[];
+    return status.peers
+        .where((peer) => peer.connected && peer.mtu > 0)
+        .map((peer) => peer.mtu);
+  }
+
+  /// Rough size of the shortest voice note worth sending (one second of audio
+  /// plus packet framing). Recording is only refused up front when even this
+  /// cannot cross the link; a clip that turns out too large for the link is
+  /// caught precisely in [_finishVoiceCapture].
+  static int get _shortestVoicePacketBytes =>
+      RoomVoiceRecorder.bitRate ~/ 8 + RoomVoicePacketCodec.overheadBytes + 64;
+
+  Future<void> _startVoiceCapture() async {
+    if (_recordingVoice || _sendingVoice) return;
+    final policy = policyForRole(widget.roomId, widget.role);
+    if (!canSend(policy, ref.read(userRolesProvider))) {
+      setState(() => _error = 'You are not allowed to post in this room.');
+      return;
+    }
+    final blocked = RoomVoiceCapacity.blockedReason(
+      connectedPeerMtus: _connectedPeerMtus,
+      packetBytes: _shortestVoicePacketBytes,
+    );
+    if (blocked != null) {
+      setState(() => _error = blocked);
+      return;
+    }
+    await _voicePlayer.stop();
+    final recorder = RoomVoiceRecorder();
+    _voiceRecorder = recorder;
+    try {
+      await recorder.start();
+    } on StateError catch (e) {
+      _voiceRecorder = null;
+      if (mounted) setState(() => _error = e.message);
+      return;
+    } catch (_) {
+      _voiceRecorder = null;
+      if (mounted) {
+        setState(() => _error = 'Could not start recording on this device.');
+      }
+      return;
+    }
+    if (!mounted) {
+      await recorder.dispose();
+      _voiceRecorder = null;
+      return;
+    }
+    setState(() {
+      _recordingVoice = true;
+      _voiceElapsed = Duration.zero;
+      _error = null;
+    });
+    _voiceTicker = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted) return;
+      setState(() => _voiceElapsed = recorder.elapsed);
+      // The recorder stops itself at the cap; reflect that in the UI and send.
+      if (recorder.elapsed >= recorder.cap) unawaited(_finishVoiceCapture());
+    });
+  }
+
+  Future<void> _finishVoiceCapture() async {
+    final recorder = _voiceRecorder;
+    if (recorder == null || _sendingVoice) return;
+    _sendingVoice = true;
+    _voiceTicker?.cancel();
+    _voiceTicker = null;
+    try {
+      final clip = await recorder.stop();
+      await recorder.dispose();
+      _voiceRecorder = null;
+      if (!mounted) return;
+      setState(() {
+        _recordingVoice = false;
+        _voiceElapsed = Duration.zero;
+      });
+      if (clip == null) {
+        setState(
+          () => _error =
+              'Hold the microphone to record, release to send '
+              '(minimum ${RoomVoiceRecorder.minClip.inMilliseconds} ms).',
+        );
+        return;
+      }
+      await _sendVoiceClip(clip);
+    } finally {
+      _sendingVoice = false;
+    }
+  }
+
+  Future<void> _cancelVoiceCapture() async {
+    final recorder = _voiceRecorder;
+    _voiceTicker?.cancel();
+    _voiceTicker = null;
+    _voiceRecorder = null;
+    if (recorder != null) await recorder.dispose();
+    if (!mounted) return;
+    setState(() {
+      _recordingVoice = false;
+      _voiceElapsed = Duration.zero;
+    });
+  }
+
+  /// Accessible equivalent of press-and-hold: assistive technology activates
+  /// the mic once to start and once again to stop, since it cannot express a
+  /// sustained press.
+  Future<void> _toggleVoiceCapture() =>
+      _recordingVoice ? _finishVoiceCapture() : _startVoiceCapture();
+
+  Future<void> _sendVoiceClip(RoomVoiceClip clip) async {
+    final policy = policyForRole(widget.roomId, widget.role);
+    final userRoles = ref.read(userRolesProvider);
+    // Precise check now that the real clip size is known: refuse a note the
+    // link would silently defer rather than queueing one that never arrives.
+    final packetBytes =
+        clip.audio.length +
+        RoomVoicePacketCodec.overheadBytes +
+        RoomVoicePacketCodec.maxSenderNameBytes;
+    final blocked = RoomVoiceCapacity.blockedReason(
+      connectedPeerMtus: _connectedPeerMtus,
+      packetBytes: packetBytes,
+    );
+    if (blocked != null) {
+      setState(() => _error = blocked);
+      return;
+    }
+    try {
+      await RoomMessageDispatcher(
+        ref.read(roomRepositoryProvider(widget.siteId)),
+        _liveTransport,
+      ).sendVoice(
+        policy: policy,
+        userRoles: userRoles,
+        audio: clip.audio,
+        durationMs: clip.durationMs,
+      );
+      if (mounted) setState(() => _error = null);
+    } on StateError catch (e) {
+      if (mounted) setState(() => _error = e.message);
     }
   }
 
@@ -362,6 +539,9 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
                       sender: m.mine ? 'You' : (m.fromPeerId ?? 'Peer'),
                       reason: reason,
                       deliveryState: m.mine ? m.state : null,
+                      voice: m.voice,
+                      eventId: m.eventId,
+                      player: _voicePlayer,
                     );
                   },
                 );
@@ -402,30 +582,44 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
             ),
             child: SafeArea(
               top: false,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _textController,
-                      maxLength: policy.maxMessageBytes,
-                      minLines: 1,
-                      maxLines: 4,
-                      decoration: const InputDecoration(
-                        hintText: 'Message',
-                        counterText: '',
-                      ),
-                      onSubmitted: (_) => _send(),
+              child: _recordingVoice
+                  ? _VoiceRecordingBar(
+                      elapsed: _voiceElapsed,
+                      cap: RoomVoiceRecorder.maxClip,
+                      onCancel: _cancelVoiceCapture,
+                      onSend: _finishVoiceCapture,
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _textController,
+                            maxLength: policy.maxMessageBytes,
+                            minLines: 1,
+                            maxLines: 4,
+                            decoration: const InputDecoration(
+                              hintText: 'Message',
+                              counterText: '',
+                            ),
+                            onSubmitted: (_) => _send(),
+                          ),
+                        ),
+                        const SizedBox(width: MeshSpace.sm),
+                        _PushToTalkButton(
+                          onPressStart: _startVoiceCapture,
+                          onPressEnd: _finishVoiceCapture,
+                          onPressCancel: _cancelVoiceCapture,
+                          onAccessibleActivate: _toggleVoiceCapture,
+                        ),
+                        const SizedBox(width: MeshSpace.sm),
+                        IconButton.filled(
+                          tooltip: 'Send message',
+                          icon: const Icon(Icons.send_rounded),
+                          onPressed: _send,
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(width: MeshSpace.sm),
-                  IconButton.filled(
-                    tooltip: 'Send message',
-                    icon: const Icon(Icons.send_rounded),
-                    onPressed: _send,
-                  ),
-                ],
-              ),
             ),
           ),
         ],
@@ -463,6 +657,9 @@ class _MessageBubble extends StatelessWidget {
     required this.sender,
     required this.reason,
     required this.deliveryState,
+    required this.eventId,
+    required this.player,
+    this.voice,
   });
 
   final String text;
@@ -470,11 +667,19 @@ class _MessageBubble extends StatelessWidget {
   final String sender;
   final String? reason;
   final RoomMessageState? deliveryState;
+  final String eventId;
+  final RoomVoicePlayer player;
+
+  /// Non-null when this bubble is a voice note rather than text.
+  final RoomVoiceAttachment? voice;
 
   @override
   Widget build(BuildContext context) {
     final palette = MeshPalette.of(context);
-    final structured = _StructuredMessage.tryParse(text);
+    final attachment = voice;
+    final structured = attachment == null
+        ? _StructuredMessage.tryParse(text)
+        : null;
     final foreground = mine
         ? palette.onPrimary
         : Theme.of(context).colorScheme.onSurface;
@@ -501,7 +706,14 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (structured == null)
+            if (attachment != null)
+              _VoiceBubbleBody(
+                eventId: eventId,
+                voice: attachment,
+                foreground: foreground,
+                player: player,
+              )
+            else if (structured == null)
               Text(text, style: TextStyle(color: foreground))
             else
               _StructuredMessageCard(
@@ -530,6 +742,182 @@ class _MessageBubble extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Playable body of a voice-note bubble: a play/stop control, the clip length,
+/// and a static waveform hint. Rebuilds only itself when playback starts or
+/// stops, via the shared player's [RoomVoicePlayer.playingEventId].
+class _VoiceBubbleBody extends StatelessWidget {
+  const _VoiceBubbleBody({
+    required this.eventId,
+    required this.voice,
+    required this.foreground,
+    required this.player,
+  });
+
+  final String eventId;
+  final RoomVoiceAttachment voice;
+  final Color foreground;
+  final RoomVoicePlayer player;
+
+  @override
+  Widget build(BuildContext context) {
+    final seconds = (voice.durationMs / 1000).toStringAsFixed(1);
+    return ValueListenableBuilder<String?>(
+      valueListenable: player.playingEventId,
+      builder: (context, playingEventId, _) {
+        final playing = playingEventId == eventId;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Semantics(
+              button: true,
+              label: playing
+                  ? 'Stop voice note'
+                  : 'Play $seconds second voice note',
+              child: IconButton(
+                iconSize: 22,
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+                color: foreground,
+                tooltip: playing ? 'Stop' : 'Play voice note',
+                icon: Icon(
+                  playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                ),
+                onPressed: () => player.toggle(eventId, voice.audio),
+              ),
+            ),
+            const SizedBox(width: MeshSpace.xs),
+            Icon(
+              Icons.graphic_eq,
+              size: 18,
+              color: foreground.withValues(alpha: .72),
+            ),
+            const SizedBox(width: MeshSpace.sm),
+            Text(
+              '${seconds}s voice note',
+              style: TextStyle(color: foreground),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Press-and-hold microphone.
+///
+/// [onPressStart] fires on pointer-down rather than on a long-press so the
+/// first syllable is not clipped; dragging off the button cancels the take.
+/// [onAccessibleActivate] gives screen-reader and switch users a start/stop
+/// toggle, because assistive technology cannot express a sustained press.
+class _PushToTalkButton extends StatelessWidget {
+  const _PushToTalkButton({
+    required this.onPressStart,
+    required this.onPressEnd,
+    required this.onPressCancel,
+    required this.onAccessibleActivate,
+  });
+
+  final Future<void> Function() onPressStart;
+  final Future<void> Function() onPressEnd;
+  final Future<void> Function() onPressCancel;
+  final Future<void> Function() onAccessibleActivate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Record a voice note. Hold to record, release to send.',
+      onTap: () => unawaited(onAccessibleActivate()),
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTapDown: (_) => unawaited(onPressStart()),
+        onTapUp: (_) => unawaited(onPressEnd()),
+        onTapCancel: () => unawaited(onPressCancel()),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          ),
+          child: Icon(
+            Icons.mic_none_rounded,
+            color: Theme.of(context).colorScheme.onSurface,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Replaces the text composer while a voice note is being captured, so the
+/// elapsed time and the cap are both visible and the take can be abandoned.
+class _VoiceRecordingBar extends StatelessWidget {
+  const _VoiceRecordingBar({
+    required this.elapsed,
+    required this.cap,
+    required this.onCancel,
+    required this.onSend,
+  });
+
+  final Duration elapsed;
+  final Duration cap;
+  final Future<void> Function() onCancel;
+  final Future<void> Function() onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MeshPalette.of(context);
+    final progress = cap.inMilliseconds == 0
+        ? 0.0
+        : (elapsed.inMilliseconds / cap.inMilliseconds).clamp(0.0, 1.0);
+    final remaining = cap - elapsed;
+    return Semantics(
+      liveRegion: true,
+      label: 'Recording voice note, '
+          '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)} seconds',
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Discard recording',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () => unawaited(onCancel()),
+          ),
+          Icon(Icons.mic, color: palette.ember),
+          const SizedBox(width: MeshSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)}s · '
+                  '${(remaining.inMilliseconds / 1000).clamp(0, 99).toStringAsFixed(1)}s left',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: MeshSpace.xs),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(MeshRadius.md),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 4,
+                    color: palette.ember,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: MeshSpace.sm),
+          IconButton.filled(
+            tooltip: 'Send voice note',
+            icon: const Icon(Icons.send_rounded),
+            onPressed: () => unawaited(onSend()),
+          ),
+        ],
       ),
     );
   }

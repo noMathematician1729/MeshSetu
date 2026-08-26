@@ -38,5 +38,9 @@ enum PayloadType {
   ACK = 5;
   RESPONDER_UPDATE = 6;
   BEACON_OBSERVATION = 7;
+  // Push-to-talk voice note authored inside a Room. Distinct from
+  // VOICE_OBJECT, which is SOS evidence and is forwarded to the control
+  // room; room voice stays inside the room's membership.
+  ROOM_VOICE = 8;
 }
 

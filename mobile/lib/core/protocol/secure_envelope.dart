@@ -135,4 +135,10 @@ TrafficClass _trafficClassFor(PayloadType type) => switch (type) {
   PayloadType.responderUpdate => TrafficClass.authorityControl,
   PayloadType.beaconObservation => TrafficClass.telemetry,
   PayloadType.structuredSos => TrafficClass.sosStructured,
+  // Lowest-ranked band on purpose. A room voice note is a few kilobytes of
+  // convenience traffic, so it must sit behind room text
+  // ([TrafficClass.roomMessage], rank 4) as well as SOS — and it must be
+  // preemptible mid-transfer, which `OutboundScheduler.hasHigherPriorityThan`
+  // only reports for a class every other class outranks.
+  PayloadType.roomVoice => TrafficClass.telemetry,
 };
