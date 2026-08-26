@@ -85,6 +85,41 @@ final _defaultManifests = <SttLanguage, SttModelManifest>{
     197595461,
     '822ed7f0b809bbd479275bf91c913d05564b88c0d082bbcba2f37999b88cb598',
   ),
+  SttLanguage.assamese: _manifest(
+    SttLanguage.assamese,
+    197595509,
+    'b8c027e8ab6c9f64417a879b85c61254aefc3557b1875bf793fb5a33abb20426',
+  ),
+  SttLanguage.bengali: _manifest(
+    SttLanguage.bengali,
+    197595578,
+    'e9120a534f69df065314be468bf15579f1b92a4cd8c07ad119b80b69244718a8',
+  ),
+  SttLanguage.kannada: _manifest(
+    SttLanguage.kannada,
+    197595728,
+    'b226ce7e4ea35b0dd66991964bd00e011b6b14b0fcdf4f7d1cccd777781c94dc',
+  ),
+  SttLanguage.malayalam: _manifest(
+    SttLanguage.malayalam,
+    197595555,
+    'dcbdfa9f773db910508b40b703cb76c5974e8d4c6f123ea81265b40853c3f0c2',
+  ),
+  SttLanguage.punjabi: _manifest(
+    SttLanguage.punjabi,
+    197595548,
+    'ccd02e5ae7e71b6719de517c2819ce570247c1d9e79b3348e76cfd5eb3e5dbbc',
+  ),
+  SttLanguage.tamil: _manifest(
+    SttLanguage.tamil,
+    197595513,
+    'abb7b59d706b8d27ba3fb5e5e3db7671c9e1a09bf7bc6122de507c60030e65fb',
+  ),
+  SttLanguage.telugu: _manifest(
+    SttLanguage.telugu,
+    197595693,
+    '710f176e33080f1be84b4f38bb5f33be3f522dcf4f191bf4d5cc89f7a85924f3',
+  ),
 };
 
 SttModelManifest _manifest(

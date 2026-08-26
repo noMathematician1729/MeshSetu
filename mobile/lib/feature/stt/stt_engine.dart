@@ -5,7 +5,14 @@ enum SttLanguage {
   english('English', 'en'),
   hindi('Hindi', 'hi'),
   marathi('Marathi', 'mr'),
-  gujarati('Gujarati', 'gu');
+  gujarati('Gujarati', 'gu'),
+  assamese('Assamese', 'as'),
+  bengali('Bengali', 'bn'),
+  kannada('Kannada', 'kn'),
+  malayalam('Malayalam', 'ml'),
+  punjabi('Punjabi', 'pa'),
+  tamil('Tamil', 'ta'),
+  telugu('Telugu', 'te');
 
   const SttLanguage(this.displayName, this.code);
 

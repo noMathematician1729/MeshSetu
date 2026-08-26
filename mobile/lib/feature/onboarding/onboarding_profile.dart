@@ -73,7 +73,7 @@ final class OnboardingProfile {
       return 'Enter your phone number in E.164 format, e.g. +919876543210.';
     }
     if (SttLanguage.fromDisplayName(language) == null) {
-      return 'Select English, Hindi, Marathi, or Gujarati.';
+      return 'Select one of the supported languages.';
     }
     if (emergencyContacts.isEmpty) {
       return 'Add at least one emergency contact.';
