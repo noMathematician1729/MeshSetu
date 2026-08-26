@@ -8,6 +8,9 @@ void main() {
     expect(const MeshLocalizations(Locale('hi')).text('Home'), 'होम');
     expect(const MeshLocalizations(Locale('mr')).text('Home'), 'मुख्यपृष्ठ');
     expect(const MeshLocalizations(Locale('gu')).text('Home'), 'હોમ');
+    expect(const MeshLocalizations(Locale('bn')).text('Home'), 'হোম');
+    expect(const MeshLocalizations(Locale('ta')).text('Home'), 'முகப்பு');
+    expect(const MeshLocalizations(Locale('te')).text('Home'), 'హోమ్');
   });
 
   test('leaves dynamic user content unchanged', () {

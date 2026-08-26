@@ -11,7 +11,8 @@ void main() {
     expect(SttLanguage.fromDisplayName('Hindi'), SttLanguage.hindi);
     expect(SttLanguage.fromDisplayName('Marathi'), SttLanguage.marathi);
     expect(SttLanguage.fromDisplayName('Gujarati'), SttLanguage.gujarati);
-    expect(SttLanguage.fromDisplayName('Kannada'), isNull);
+    expect(SttLanguage.fromDisplayName('Kannada'), SttLanguage.kannada);
+    expect(SttLanguage.fromDisplayName('Telugu'), SttLanguage.telugu);
   });
 
   test(
@@ -65,6 +66,21 @@ void main() {
     expect(
       validateSttTranscriptScript('ગુજરાતી', SttLanguage.gujarati),
       'ગુજરાતી',
+    );
+  });
+
+  test('new language transcripts require their native scripts', () {
+    expect(
+      validateSttTranscriptScript('আমি সাহায্য চাই', SttLanguage.bengali),
+      'আমি সাহায্য চাই',
+    );
+    expect(
+      validateSttTranscriptScript('ನನಗೆ ಸಹಾಯ ಬೇಕು', SttLanguage.kannada),
+      'ನನಗೆ ಸಹಾಯ ಬೇಕು',
+    );
+    expect(
+      () => validateSttTranscriptScript('help needed', SttLanguage.tamil),
+      throwsA(isA<StateError>()),
     );
   });
 }

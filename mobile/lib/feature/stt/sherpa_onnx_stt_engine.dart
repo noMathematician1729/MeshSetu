@@ -109,6 +109,14 @@ final _devanagariOnly = RegExp(
 final _gujaratiOnly = RegExp(
   r'^[\u0A80-\u0AFF\u0964\u09650-9\s.,!?…:;()\-—]+$',
 );
+final _bengaliAssameseOnly = RegExp(
+  r'^[\u0980-\u09FF\u0964\u09650-9\s.,!?…:;()\-—]+$',
+);
+final _kannadaOnly = RegExp(r'^[\u0C80-\u0CFF0-9\s.,!?…:;()\-—]+$');
+final _malayalamOnly = RegExp(r'^[\u0D00-\u0D7F0-9\s.,!?…:;()\-—]+$');
+final _gurmukhiOnly = RegExp(r'^[\u0A00-\u0A7F0-9\s.,!?…:;()\-—]+$');
+final _tamilOnly = RegExp(r'^[\u0B80-\u0BFF0-9\s.,!?…:;()\-—]+$');
+final _teluguOnly = RegExp(r'^[\u0C00-\u0C7F0-9\s.,!?…:;()\-—]+$');
 
 /// Refuses to insert a transcript in an unexpected script. This is a safety
 /// check, not a transliteration step: altering an Urdu transcript would make
@@ -122,11 +130,25 @@ String validateSttTranscriptScript(String value, SttLanguage language) {
     SttLanguage.english => null,
     SttLanguage.hindi || SttLanguage.marathi => _devanagariOnly,
     SttLanguage.gujarati => _gujaratiOnly,
+    SttLanguage.assamese || SttLanguage.bengali => _bengaliAssameseOnly,
+    SttLanguage.kannada => _kannadaOnly,
+    SttLanguage.malayalam => _malayalamOnly,
+    SttLanguage.punjabi => _gurmukhiOnly,
+    SttLanguage.tamil => _tamilOnly,
+    SttLanguage.telugu => _teluguOnly,
   };
   if (text.isNotEmpty && pattern != null && !pattern.hasMatch(text)) {
-    final requiredScript = language == SttLanguage.gujarati
-        ? 'Gujarati'
-        : 'Devanagari';
+    final requiredScript = switch (language) {
+      SttLanguage.hindi || SttLanguage.marathi => 'Devanagari',
+      SttLanguage.gujarati => 'Gujarati',
+      SttLanguage.assamese || SttLanguage.bengali => 'Bengali-Assamese',
+      SttLanguage.kannada => 'Kannada',
+      SttLanguage.malayalam => 'Malayalam',
+      SttLanguage.punjabi => 'Gurmukhi',
+      SttLanguage.tamil => 'Tamil',
+      SttLanguage.telugu => 'Telugu',
+      SttLanguage.english => 'Latin',
+    };
     throw StateError(
       '${language.displayName} voice input must be in $requiredScript script. '
       'Please record it again.',
