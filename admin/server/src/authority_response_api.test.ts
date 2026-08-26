@@ -72,6 +72,20 @@ describe('authority response HTTP lifecycle', () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
   })
 
+  it('allows authority-response preflight headers from the local admin client', async () => {
+    const preflight = await request('/v1/events/api-event-1/responses', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://localhost:5173',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization,content-type,idempotency-key',
+      },
+    })
+    expect(preflight.status).toBe(204)
+    expect(preflight.headers.get('access-control-allow-origin')).toBe('http://localhost:5173')
+    expect(preflight.headers.get('access-control-allow-headers')?.toLowerCase()).toContain('idempotency-key')
+  })
+
   it('creates an idempotent signed response and rejects conflicting replay', async () => {
     const created = await createResponse('same-key')
     expect(created.status).toBe(201)
@@ -93,6 +107,23 @@ describe('authority response HTTP lifecycle', () => {
       body: JSON.stringify({ type: 'SOS_RECEIVED', message_text: 'different text', expires_in_seconds: 300 }),
     })
     expect(conflict.status).toBe(409)
+  })
+
+  it('preserves the sender incident namespace in a response record', async () => {
+    await store.upsert({ ...eventRecord(), site_id: 'phone-a-local-event' })
+
+    const created = await createResponse('namespace-key')
+    expect(created.status).toBe(201)
+    const response = await created.json() as { site_id: string }
+    expect(response.site_id).toBe('phone-a-local-event')
+  })
+
+  it('waits for verified encrypted SOS details before signing a compact-only return', async () => {
+    await store.upsert({ ...eventRecord(), decrypt_status: 'ceal-uid-only' })
+
+    const created = await createResponse('compact-only-key')
+    expect(created.status).toBe(409)
+    expect((await created.json()).error).toContain('verified encrypted SOS')
   })
 
   it('long-polls a pending command, acknowledges it, and hides it from the next poll', async () => {
@@ -146,6 +177,96 @@ describe('authority response HTTP lifecycle', () => {
     })
     expect(accepted.status).toBe(200)
     expect((await accepted.json()).response.state).toBe('RECEIPT_AT_DASHBOARD')
+  })
+
+  it('accepts authenticated monotonic mesh progress and rejects false sender delivery', async () => {
+    const created = await createResponse('progress-key')
+    const response = await created.json() as { response_id: string }
+
+    const unauthenticated = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'FORWARDING', route_mode: 'reverseCache', return_hops: 1, retry_count: 0 }),
+    })
+    expect(unauthenticated.status).toBe(401)
+
+    const queued = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'MESH_QUEUED', gateway_session_id: 'gateway-session', return_hops: 0, retry_count: 0 }),
+    })
+    expect(queued.status).toBe(200)
+    expect((await queued.json()).response.state).toBe('MESH_QUEUED')
+
+    const forwarding = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'FORWARDING', route_mode: 'reverseCache', return_hops: 1, retry_count: 0 }),
+    })
+    expect(forwarding.status).toBe(200)
+    expect((await forwarding.json()).response.route_mode).toBe('reverseCache')
+
+    const duplicate = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'FORWARDING', route_mode: 'reverseCache', return_hops: 1, retry_count: 0 }),
+    })
+    expect(duplicate.status).toBe(200)
+
+    const regression = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'MESH_QUEUED' }),
+    })
+    expect(regression.status).toBe(409)
+
+    const forgedDelivery = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'SENDER_DELIVERED' }),
+    })
+    expect(forgedDelivery.status).toBe(400)
+
+    const delivered = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'SENDER_DELIVERED', receipt_id: 'progress-receipt', reply_to_event_id: 'api-event-1', sender_ephemeral_id: '123456789' }),
+    })
+    expect(delivered.status).toBe(200)
+    expect((await delivered.json()).response.state).toBe('SENDER_DELIVERED')
+  })
+
+  it('persists explicit no-route failure and terminal progress is not reversible', async () => {
+    const created = await createResponse('failure-progress-key')
+    const response = await created.json() as { response_id: string }
+    const failed = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'FAILED', route_mode: 'retry', retry_count: 4, error: 'no_eligible_return_route' }),
+    })
+    expect(failed.status).toBe(200)
+    expect((await failed.json()).response.last_error).toBe('no_eligible_return_route')
+
+    const lateForward = await request(`/v1/responses/${response.response_id}/progress`, {
+      method: 'POST',
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway', 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'FORWARDING', route_mode: 'retry', retry_count: 5 }),
+    })
+    expect(lateForward.status).toBe(409)
+  })
+
+  it('sends gateway commands with the original mesh event ID after incident convergence', async () => {
+    await store.upsert({ ...eventRecord(), return_event_id: 'wire-event-1' })
+    const created = await createResponse('converged-event-key')
+    const response = await created.json() as { response_id: string; event_id: string; reply_to_event_id: string }
+    expect(response.event_id).toBe('api-event-1')
+    expect(response.reply_to_event_id).toBe('wire-event-1')
+
+    const commands = await request('/v1/gateways/gateway-session/commands?cursor=0&wait_ms=0', {
+      headers: { 'x-meshsetu-gateway-key': 'meshsetu-test-gateway' },
+    })
+    const command = (await commands.json() as { commands: Array<{ response_id: string; event_id: string }> }).commands
+      .find((item) => item.response_id === response.response_id)
+    expect(command?.event_id).toBe('wire-event-1')
   })
 
   it('paginates commands created in the same millisecond without skipping either response', async () => {

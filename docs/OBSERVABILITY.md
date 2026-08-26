@@ -21,6 +21,8 @@ Before exporting metrics off-device, replace peer/session hints with a rotating,
 | `response_delivered` | Sender verified and persisted the response |
 | `response_expired` | Response/body/route/hop window ended |
 | `custody_ack_received` | Ordinary mesh custody, not sender authority delivery |
+| `response_progress_reported` | Foreground ReturnRouter emitted a bounded lifecycle state for gateway upload; inspect the server timeline for the authoritative current state |
+| `reverse_route_failed` | Bounded reverse-route retry budget was exhausted; the response is terminally failed rather than silently queued |
 
 ## Dashboards and SLO-style summaries
 

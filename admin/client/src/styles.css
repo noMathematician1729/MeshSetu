@@ -19,10 +19,20 @@
 .response-form textarea::placeholder { color: var(--pebble); opacity: 1; }
 .response-form button { justify-self: start; border: 0; border-radius: .45rem; padding: .65rem .9rem; background: #b51f2c; color: white; font-weight: 700; cursor: pointer; }
 .response-form button:disabled { opacity: .55; cursor: not-allowed; }
-.response-timeline { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .35rem; margin-top: 1rem; }
+.response-timeline { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .35rem; margin-top: 1rem; }
 .response-timeline span { color: var(--pebble); font-size: .68rem; line-height: 1.25; }
 .response-timeline i { display: block; width: .55rem; height: .55rem; margin-bottom: .3rem; border-radius: 50%; background: var(--iron); }
 .response-timeline span.done, .response-timeline span.current { color: var(--ash); }
 .response-timeline span.current { color: var(--bone); }
 .response-timeline span.done i, .response-timeline span.current i { background: var(--red); }
+.response-timeline span.terminal { color: var(--red); }
+.response-timeline span.terminal i { background: var(--red); }
 .response-honesty { display: block; margin-top: .75rem; color: var(--pebble); }
+
+.response-send-feedback { display: flex; align-items: flex-start; gap: .6rem; margin-top: .75rem; padding: .7rem .8rem; border: 1px solid var(--graphite); background: var(--void); color: var(--pebble); font-size: .75rem; line-height: 1.4; }
+.response-send-feedback.sending { border-color: #8b6f24; color: var(--ash); }
+.response-send-feedback.success { border-color: #2d746d; color: #83fff7; }
+.response-send-feedback.error { border-color: var(--red); color: #ff9aa5; }
+.response-send-indicator { display: inline-grid; place-items: center; flex: 0 0 auto; width: 1.1rem; height: 1.1rem; border: 1px solid currentColor; border-radius: 50%; font: 700 .7rem/1 monospace; }
+.response-send-feedback.sending .response-send-indicator { border-color: #f3c94b; border-right-color: transparent; animation: response-send-spin .8s linear infinite; color: #f3c94b; font-size: 0; }
+@keyframes response-send-spin { to { transform: rotate(360deg); } }

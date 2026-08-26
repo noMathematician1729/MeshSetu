@@ -6,7 +6,21 @@ let token = localStorage.getItem('meshsetu_token') || ''
 export const authToken = () => token
 export function setToken(value) { token = value; value ? localStorage.setItem('meshsetu_token', value) : localStorage.removeItem('meshsetu_token') }
 function headers() { return token ? { Authorization: `Bearer ${token}` } : {} }
-async function request(path, options = {}) { const response = await fetch(`${base}${path}`, { ...options, headers: { ...headers(), ...(options.headers || {}) } }); if (response.status === 401) { setToken(''); throw new Error('Session expired') }; if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Request failed (${response.status})`); return response }
+async function request(path, options = {}) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30000)
+  try {
+    const response = await fetch(`${base}${path}`, { ...options, signal: controller.signal, headers: { ...headers(), ...(options.headers || {}) } })
+    if (response.status === 401) { setToken(''); throw new Error('Session expired') }
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Request failed (${response.status})`)
+    return response
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Request timed out after 30 seconds. Check the backend and try again.')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 export async function login(email, password) { const response = await fetch(`${base}/v1/auth/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }); if (!response.ok) throw new Error('Invalid operator credentials'); const data = await response.json(); setToken(data.access_token); return data }
 export async function getEvents() { return (await request('/v1/sos')).json() }
 export async function getNearbyAuthorities({ latitude, longitude, type }) { return (await request(`/v1/authorities/nearby?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&type=${encodeURIComponent(type)}`)).json() }

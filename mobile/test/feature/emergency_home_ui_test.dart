@@ -38,6 +38,226 @@ void main() {
     expect(find.byType(BottomNavigationBar), findsNothing);
   });
 
+  testWidgets('shows a start event mode control when event mode is inactive', (
+    tester,
+  ) async {
+    var toggled = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MeshTheme.light(),
+        home: EmergencyHomeScreen(
+          eventModeActive: false,
+          sending: false,
+          emergencyType: SosEmergencyType.general,
+          description: '',
+          holdSeconds: 3,
+          onSos: () {},
+          onProfile: () {},
+          onEmergencyType: () {},
+          onVoice: () {},
+          onDescribe: () {},
+          onCreateRoom: () {},
+          onJoinRoom: () {},
+          onToggleEventMode: () => toggled++,
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('Start event mode'), findsOneWidget);
+    expect(find.byTooltip('Stop event mode'), findsNothing);
+    await tester.tap(find.byTooltip('Start event mode'));
+    expect(toggled, 1);
+  });
+
+  testWidgets('shows a stop event mode control when event mode is active', (
+    tester,
+  ) async {
+    var toggled = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MeshTheme.light(),
+        home: EmergencyHomeScreen(
+          eventModeActive: true,
+          sending: false,
+          emergencyType: SosEmergencyType.general,
+          description: '',
+          holdSeconds: 3,
+          onSos: () {},
+          onProfile: () {},
+          onEmergencyType: () {},
+          onVoice: () {},
+          onDescribe: () {},
+          onCreateRoom: () {},
+          onJoinRoom: () {},
+          onToggleEventMode: () => toggled++,
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('Stop event mode'), findsOneWidget);
+    expect(find.byTooltip('Start event mode'), findsNothing);
+    await tester.tap(find.byTooltip('Stop event mode'));
+    expect(toggled, 1);
+  });
+
+  testWidgets(
+    'omits the event mode control entirely when no callback is provided',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MeshTheme.light(),
+          home: EmergencyHomeScreen(
+            eventModeActive: true,
+            sending: false,
+            emergencyType: SosEmergencyType.general,
+            description: '',
+            holdSeconds: 3,
+            onSos: () {},
+            onProfile: () {},
+            onEmergencyType: () {},
+            onVoice: () {},
+            onDescribe: () {},
+            onCreateRoom: () {},
+            onJoinRoom: () {},
+          ),
+        ),
+      );
+
+      expect(find.byTooltip('Stop event mode'), findsNothing);
+      expect(find.byTooltip('Start event mode'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'shows the verified control-room message on the emergency screen',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MeshTheme.light(),
+          home: EmergencyHomeScreen(
+            eventModeActive: true,
+            sending: false,
+            emergencyType: SosEmergencyType.general,
+            description: '',
+            holdSeconds: 3,
+            authorityResponseType: 'SOS_RECEIVED',
+            authorityResponseMessage: 'Control room received your SOS.',
+            onSos: () {},
+            onProfile: () {},
+            onEmergencyType: () {},
+            onVoice: () {},
+            onDescribe: () {},
+            onCreateRoom: () {},
+            onJoinRoom: () {},
+          ),
+        ),
+      );
+
+      expect(find.text('Control room response'), findsOneWidget);
+      expect(find.text('SOS_RECEIVED'), findsOneWidget);
+      expect(find.text('Control room received your SOS.'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'shows a plain-language rejection reason when the response could not be verified',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MeshTheme.light(),
+          home: EmergencyHomeScreen(
+            eventModeActive: true,
+            sending: false,
+            emergencyType: SosEmergencyType.general,
+            description: '',
+            holdSeconds: 3,
+            authorityRejectionMessage:
+                'No active event on this phone. Rejoin or recreate the '
+                'event to receive control room responses.',
+            onSos: () {},
+            onProfile: () {},
+            onEmergencyType: () {},
+            onVoice: () {},
+            onDescribe: () {},
+            onCreateRoom: () {},
+            onJoinRoom: () {},
+          ),
+        ),
+      );
+
+      expect(find.text('Control room response'), findsOneWidget);
+      expect(find.text('Could not be verified'), findsOneWidget);
+      expect(
+        find.text(
+          'No active event on this phone. Rejoin or recreate the '
+          'event to receive control room responses.',
+        ),
+        findsOneWidget,
+      );
+      // Never present alongside the accepted-response card.
+      expect(find.text('Verified response received'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'omits the control-room card entirely with no acceptance or rejection state',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MeshTheme.light(),
+          home: EmergencyHomeScreen(
+            eventModeActive: true,
+            sending: false,
+            emergencyType: SosEmergencyType.general,
+            description: '',
+            holdSeconds: 3,
+            onSos: () {},
+            onProfile: () {},
+            onEmergencyType: () {},
+            onVoice: () {},
+            onDescribe: () {},
+            onCreateRoom: () {},
+            onJoinRoom: () {},
+          ),
+        ),
+      );
+
+      expect(find.text('Control room response'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'prefers the accepted-response card when both acceptance and a stale rejection are set',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MeshTheme.light(),
+          home: EmergencyHomeScreen(
+            eventModeActive: true,
+            sending: false,
+            emergencyType: SosEmergencyType.general,
+            description: '',
+            holdSeconds: 3,
+            authorityResponseType: 'SOS_RECEIVED',
+            authorityResponseMessage: 'Control room received your SOS.',
+            authorityRejectionMessage: 'stale rejection text',
+            onSos: () {},
+            onProfile: () {},
+            onEmergencyType: () {},
+            onVoice: () {},
+            onDescribe: () {},
+            onCreateRoom: () {},
+            onJoinRoom: () {},
+          ),
+        ),
+      );
+
+      expect(find.text('Verified response received'), findsOneWidget);
+      expect(find.text('Could not be verified'), findsNothing);
+      expect(find.text('stale rejection text'), findsNothing);
+    },
+  );
+
   testWidgets('does not show the top mesh status, hold-time, or type rail', (
     tester,
   ) async {

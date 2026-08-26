@@ -10,6 +10,17 @@ const MAX_MESSAGE_UTF8_BYTES = 256
 let rootPromise: Promise<protobuf.Root> | undefined
 let material: { privateKey: crypto.KeyObject; publicJwk: AuthorityPublicJwk } | undefined
 
+// Explicitly non-production bootstrap key. Its public half is pinned in
+// development EventManifests so local server restarts cannot invalidate a
+// sender's responder-update verification key. Never use this key in a real
+// deployment; production below requires a deployment secret instead.
+const developmentPrivateKeyPem = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyuaCpkXAv5TjaIvZ
+BQwC5rc/wh0JL9SUYzmK2iaRPCOhRANCAASw8V053zj5ADOfTzii76zvHIoq9ijr
+8rrA46NyMts9HDOknPB/6AJ3qAQwHWGVFPwrXGjAf8976Lq5LJSEPQw5
+-----END PRIVATE KEY-----
+`
+
 export type AuthorityPublicJwk = {
   kty: 'EC'
   crv: 'P-256'
@@ -36,8 +47,7 @@ function privateKeyPem() {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('MESHSETU_AUTHORITY_PRIVATE_KEY_PEM_B64 is required in production')
   }
-  const generated = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
-  return generated.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  return developmentPrivateKeyPem
 }
 
 function authorityMaterial() {

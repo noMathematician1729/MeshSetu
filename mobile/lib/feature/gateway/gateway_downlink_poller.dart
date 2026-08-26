@@ -39,6 +39,7 @@ final class GatewayDownlinkPoller {
   bool _running = false;
   bool _polling = false;
   Future<void>? _receiptUploadFuture;
+  final Set<int> _submittedObjectIds = {};
   String _cursor = '0';
 
   void start() {
@@ -79,10 +80,71 @@ final class GatewayDownlinkPoller {
         for (final command in result.commands) {
           await _persistAndInject(command);
         }
+        await _injectDurableResponses();
       } catch (_) {
         if (_running) await Future<void>.delayed(const Duration(seconds: 2));
       } finally {
         _polling = false;
+      }
+    }
+  }
+
+  Future<void> _injectDurableResponses() async {
+    final now = clockMs();
+    for (final row in await _responses.ready(nowMs: now)) {
+      final objectId = row.meshObjectId;
+      if (objectId == null || !_submittedObjectIds.add(objectId)) continue;
+      if (row.expiresAtMs <= now) {
+        await _responses.markExpired(row.responseId);
+        await _reportProgress(
+          responseId: row.responseId,
+          state: 'EXPIRED',
+          error: 'response_ttl',
+        );
+        _submittedObjectIds.remove(objectId);
+        continue;
+      }
+      final signedBytes = Uint8List.fromList(row.signedPayload);
+      final SignedResponderUpdateData signed;
+      try {
+        signed = ReturnProtocol.decodeSigned(signedBytes);
+      } catch (_) {
+        await _responses.markFailed(row.responseId, 'invalid signed payload');
+        await _reportProgress(
+          responseId: row.responseId,
+          state: 'FAILED',
+          error: 'invalid_signed_payload',
+        );
+        _submittedObjectIds.remove(objectId);
+        continue;
+      }
+      final body = signed.body;
+      try {
+        await _reportProgress(
+          responseId: row.responseId,
+          state: 'MESH_QUEUED',
+          returnHops: row.hopCount,
+          retryCount: row.attempts,
+        );
+        await submitToMesh(
+          MeshEnvelope(
+            objectId: objectId,
+            eventId: row.replyToEventId,
+            siteId: body.siteId,
+            roomId: '',
+            createdAtMs: body.createdAtMs,
+            expiresAtMs: min(row.expiresAtMs, body.expiresAtMs),
+            hopCount: row.hopCount,
+            hopLimit: const ReturnChannelConfig().returnHopLimit,
+            priority: PriorityBand.p1High,
+            payloadType: PayloadType.responderUpdate,
+            payload: signedBytes,
+            originEphemeralId: localEphemeralId,
+            traceId: body.originalTraceId,
+          ),
+        );
+      } catch (_) {
+        _submittedObjectIds.remove(objectId);
       }
     }
   }
@@ -121,11 +183,20 @@ final class GatewayDownlinkPoller {
 
     // The server state transition is deliberately after local persistence.
     // A successful poll followed by process death remains recoverable.
-    await bridge.acknowledgeAuthorityCommand(
+    final acknowledged = await bridge.acknowledgeAuthorityCommand(
       gatewaySessionId: gatewaySessionId,
       responseId: body.responseId,
       meshObjectId: objectId,
     );
+    if (acknowledged) {
+      await _reportProgress(
+        responseId: body.responseId,
+        state: 'MESH_QUEUED',
+        returnHops: existing?.hopCount ?? 0,
+        retryCount: existing?.attempts ?? 0,
+      );
+    }
+    if (!_submittedObjectIds.add(objectId)) return;
     try {
       await submitToMesh(
         MeshEnvelope(
@@ -145,7 +216,16 @@ final class GatewayDownlinkPoller {
         ),
       );
     } catch (_) {
-      // The durable READY row is retried by the foreground ReturnRouter.
+      _submittedObjectIds.remove(objectId);
+      // Keep the durable READY row for the next poll/restart. The dashboard
+      // remains at truthful gateway custody rather than claiming forwarding.
+      await _reportProgress(
+        responseId: body.responseId,
+        state: 'MESH_QUEUED',
+        routeMode: 'retry',
+        retryCount: existing?.attempts ?? 0,
+        error: 'mesh_injection_pending',
+      );
     }
   }
 
@@ -159,6 +239,13 @@ final class GatewayDownlinkPoller {
         senderEphemeralId: receipt.senderEphemeralId,
         createdAtMs: receipt.createdAtMs,
       ),
+    );
+    await _reportProgress(
+      responseId: receipt.responseId,
+      state: 'SENDER_DELIVERED',
+      receiptId: receipt.ackId,
+      replyToEventId: receipt.replyToEventId,
+      senderEphemeralId: receipt.senderEphemeralId,
     );
     await uploadReadyReceipts();
   }
@@ -181,6 +268,13 @@ final class GatewayDownlinkPoller {
 
   Future<void> _uploadReadyReceipts() async {
     for (final receipt in await _responses.readyReceipts()) {
+      await _reportProgress(
+        responseId: receipt.responseId,
+        state: 'SENDER_DELIVERED',
+        receiptId: receipt.receiptId,
+        replyToEventId: receipt.replyToEventId,
+        senderEphemeralId: receipt.senderEphemeralId,
+      );
       final uploaded = await bridge.uploadResponseReceipt(
         responseId: receipt.responseId,
         receiptId: receipt.receiptId,
@@ -189,6 +283,36 @@ final class GatewayDownlinkPoller {
         createdAtMs: receipt.createdAtMs,
       );
       if (uploaded) await _responses.markReceiptUploaded(receipt.receiptId);
+    }
+  }
+
+  Future<void> _reportProgress({
+    required String responseId,
+    required String state,
+    String? routeMode,
+    int? returnHops,
+    int? retryCount,
+    String? error,
+    String? receiptId,
+    String? replyToEventId,
+    int? senderEphemeralId,
+  }) async {
+    try {
+      await bridge.reportAuthorityResponseProgress(
+        responseId: responseId,
+        gatewaySessionId: gatewaySessionId,
+        state: state,
+        routeMode: routeMode,
+        returnHops: returnHops,
+        retryCount: retryCount,
+        error: error,
+        receiptId: receiptId,
+        replyToEventId: replyToEventId,
+        senderEphemeralId: senderEphemeralId,
+      );
+    } catch (_) {
+      // Progress is advisory and retried by the durable receipt/mesh loops;
+      // never drop the signed response because the dashboard is unavailable.
     }
   }
 

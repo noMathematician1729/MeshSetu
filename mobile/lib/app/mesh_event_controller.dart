@@ -94,6 +94,7 @@ class MeshEventController {
     this.authorityTrustSnapshot,
     this.isKnownSosEvent,
     this.onVerifiedAuthorityResponse,
+    this.onAuthorityResponseProgress,
   });
 
   final MeshSiteConfiguration configuration;
@@ -109,6 +110,7 @@ class MeshEventController {
   final Future<AuthorityTrustSnapshot?> Function()? authorityTrustSnapshot;
   final Future<bool> Function(String eventId)? isKnownSosEvent;
   final VerifiedResponseListener? onVerifiedAuthorityResponse;
+  final AuthorityResponseProgressListener? onAuthorityResponseProgress;
 
   MeshTransportCoordinator? _coordinator;
   MeshDatabase? _returnDatabase;
@@ -141,6 +143,7 @@ class MeshEventController {
   /// fallback connection candidate (Bible audit Task 4).
   ///
   /// One sighting is enough: the discovery record now rides the primary
+
   /// advertisement, so a UUID-only sighting means the peer is either running
   /// an older build or its manufacturer data was genuinely dropped. Waiting
   /// for a second cycle previously cost 40+ seconds before the pair could
@@ -157,6 +160,15 @@ class MeshEventController {
   static const Duration _fallbackDialDelay = Duration(seconds: 15);
 
   MeshTransportCoordinator? get coordinator => _coordinator;
+
+  /// Originates a gateway authority response through ReturnRouter. Responder
+  /// updates are targeted control traffic, never generic broadcast traffic;
+  /// the local-destination branch also performs normal sender verification.
+  Future<void> submitResponderUpdate(MeshEnvelope envelope) async {
+    final router = _returnRouter;
+    if (router == null) throw StateError('return router is not ready');
+    await router.handleInjectedResponderUpdate(envelope);
+  }
 
   void setDebugLossInjection(bool enabled) {
     final coordinator = _coordinator;
@@ -261,7 +273,10 @@ class MeshEventController {
         localEphemeralId: _localToken,
         trustSnapshot: authorityTrustSnapshot ?? () async => null,
         isKnownSosEvent: isKnownSosEvent ?? (_) async => false,
+        isLocallyAuthoredSosEvent: isKnownSosEvent ?? (_) async => false,
+        connectToPeerHint: _connectReturnPeerHint,
         onVerifiedResponse: onVerifiedAuthorityResponse,
+        onProgress: onAuthorityResponseProgress,
         onMetric: (kind, {detail, value}) {
           _reportMetrics([RelayMetric(kind, detail: detail, value: value)]);
         },
@@ -635,6 +650,34 @@ class MeshEventController {
       ]);
       _startUuidOnlyConnection(deviceId, coordinator);
       started++;
+    }
+  }
+
+  /// Uses the short-lived route hint only after ReturnRouter has selected an
+  /// authenticated, event-scoped reverse route. HELLO still validates the
+  /// remote identity before the peer directory can be used for targeted send.
+  Future<void> _connectReturnPeerHint(
+    String peerId,
+    int expectedEphemeralId,
+  ) async {
+    final coordinator = _coordinator;
+    if (!_looping || coordinator == null) return;
+    if (coordinator.peerDirectory.entryFor(expectedEphemeralId)?.peerId ==
+        peerId) {
+      return;
+    }
+    if (!_connectingPeerIds.add(peerId)) return;
+    try {
+      await _connectUuidOnlyPeer(peerId, coordinator);
+      for (var attempt = 0; attempt < 20 && _looping; attempt++) {
+        if (coordinator.peerDirectory.entryFor(expectedEphemeralId)?.peerId ==
+            peerId) {
+          return;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } finally {
+      _connectingPeerIds.remove(peerId);
     }
   }
 

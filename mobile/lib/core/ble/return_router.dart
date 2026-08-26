@@ -26,6 +26,41 @@ enum ReturnRouteMode {
 typedef VerifiedResponseListener =
     FutureOr<void> Function(ResponderUpdateBodyData response);
 
+/// Privacy-safe lifecycle signal emitted by the foreground mesh isolate. It
+/// contains only bounded protocol state, route mode, hop/retry counters, and
+/// stable response identifiers needed by the gateway progress API.
+final class AuthorityResponseProgress {
+  const AuthorityResponseProgress({
+    required this.responseId,
+    required this.state,
+    this.routeMode,
+    this.returnHops,
+    this.retryCount,
+    this.error,
+    this.receiptId,
+    this.replyToEventId,
+    this.senderEphemeralId,
+    this.receiptCreatedAtMs,
+  });
+
+  final String responseId;
+  final String state;
+  final String? routeMode;
+  final int? returnHops;
+  final int? retryCount;
+  final String? error;
+  final String? receiptId;
+  final String? replyToEventId;
+  final int? senderEphemeralId;
+  final int? receiptCreatedAtMs;
+}
+
+typedef AuthorityResponseProgressListener =
+    FutureOr<void> Function(AuthorityResponseProgress progress);
+
+typedef PeerHintConnector =
+    Future<void> Function(String peerHint, int expectedEphemeralId);
+
 final class ReturnRouter {
   ReturnRouter({
     required this.transport,
@@ -34,10 +69,13 @@ final class ReturnRouter {
     required this.localEphemeralId,
     required this.trustSnapshot,
     required this.isKnownSosEvent,
+    this.isLocallyAuthoredSosEvent,
+    this.connectToPeerHint,
     this.config = const ReturnChannelConfig(),
     this.clockMs = _systemClock,
     this.onVerifiedResponse,
     this.onMetric,
+    this.onProgress,
   });
 
   final MeshTransportCoordinator transport;
@@ -46,10 +84,13 @@ final class ReturnRouter {
   final int localEphemeralId;
   final Future<AuthorityTrustSnapshot?> Function() trustSnapshot;
   final Future<bool> Function(String eventId) isKnownSosEvent;
+  final Future<bool> Function(String eventId)? isLocallyAuthoredSosEvent;
+  final PeerHintConnector? connectToPeerHint;
   final ReturnChannelConfig config;
   final int Function() clockMs;
   final VerifiedResponseListener? onVerifiedResponse;
   final void Function(String kind, {String? detail, int? value})? onMetric;
+  final AuthorityResponseProgressListener? onProgress;
 
   final Map<String, int> _seenResponses = {};
   final Random _random = Random.secure();
@@ -63,20 +104,36 @@ final class ReturnRouter {
     required Uint8List encryptedBytes,
   }) async {
     final now = clockMs();
-    if (envelope.expiresAtMs <= now || envelope.hopCount >= envelope.hopLimit) {
-      _metric('response_expired', value: envelope.objectId);
-      return;
-    }
     final SignedResponderUpdateData signed;
     try {
+      // Decode only; the sender branch below verifies the exact body bytes
+      // carried by this object and never verifies a reserialized message.
       signed = ReturnProtocol.decodeSigned(envelope.payload);
     } catch (error) {
       _metric('response_invalid_payload', detail: '$error');
+      if (envelope.expiresAtMs <= now ||
+          envelope.hopCount >= envelope.hopLimit) {
+        _metric('response_expired', value: envelope.objectId);
+      }
       return;
     }
     final body = signed.body;
-    if (body.siteId != envelope.siteId || body.expiresAtMs <= now) {
-      _metric('response_expired', detail: 'body_scope_or_expiry');
+    if (envelope.expiresAtMs <= now ||
+        envelope.hopCount >= envelope.hopLimit ||
+        body.expiresAtMs <= now) {
+      await _expireResponse(body.responseId, detail: 'expired_or_hop_limit');
+      _metric(
+        'response_expired',
+        value: envelope.objectId,
+        detail: envelope.hopCount >= envelope.hopLimit
+            ? 'hop_limit'
+            : 'response_ttl',
+      );
+      return;
+    }
+    if (body.siteId != envelope.siteId) {
+      await _failResponse(body.responseId, 'wrong_site');
+      _metric('response_invalid_scope', detail: 'wrong_site');
       return;
     }
     final seen = _seenResponses[body.responseId];
@@ -114,11 +171,21 @@ final class ReturnRouter {
     );
   }
 
+  /// Gateway downlink injection uses this entry point rather than generic
+  /// broadcast replication. It gives a gateway-as-destination the same
+  /// trust/event/expiry/receipt path as a response received from a peer.
+  Future<void> handleInjectedResponderUpdate(MeshEnvelope envelope) =>
+      handleResponderUpdate(
+        envelope: envelope,
+        fromPeerId: '__gateway_origin__',
+        encryptedBytes: Uint8List(0),
+      );
+
   Future<void> retryDue() async {
     final now = clockMs();
     for (final row in await responses.ready(nowMs: now)) {
       if (row.expiresAtMs <= now) {
-        await responses.markExpired(row.responseId);
+        await _expireResponse(row.responseId, detail: 'response_ttl');
         _metric('response_expired');
         continue;
       }
@@ -127,7 +194,7 @@ final class ReturnRouter {
       try {
         signed = ReturnProtocol.decodeSigned(signedBytes);
       } catch (_) {
-        await responses.markFailed(row.responseId, 'invalid signed payload');
+        await _failResponse(row.responseId, 'invalid_signed_payload');
         continue;
       }
       final envelope = MeshEnvelope(
@@ -160,28 +227,44 @@ final class ReturnRouter {
   ) async {
     final body = signed.body;
     final trust = await trustSnapshot();
-    if (trust == null ||
-        trust.siteId != body.siteId ||
-        trust.keyId != signed.authorityKeyId ||
-        signed.algorithm != ReturnSignatureAlgorithm.ecdsaP256Sha256) {
-      _metric('authority_signature_rejected', detail: 'trust_material');
+    final trustFailure = switch (trust) {
+      null => 'authority_trust_missing',
+      _ when trust.siteId != body.siteId => 'authority_trust_rejected_site',
+      _ when trust.keyId != signed.authorityKeyId =>
+        'authority_trust_rejected_key_id',
+      _ when signed.algorithm != ReturnSignatureAlgorithm.ecdsaP256Sha256 =>
+        'authority_trust_rejected_algorithm',
+      _ => null,
+    };
+    if (trustFailure != null) {
+      await _failResponse(body.responseId, 'authority_trust_rejected');
+      // Deliberately identify only the guard category. Do not emit raw signed
+      // bodies, signatures, or public-key material into protocol metrics.
+      _metric('authority_signature_rejected', detail: trustFailure);
       return;
     }
+    final verifiedTrust = trust!;
     final valid = await const AuthoritySignatureVerifier().verify(
-      publicKey: trust.publicKey,
+      publicKey: verifiedTrust.publicKey,
       body: signed.bodyBytes,
       signature: signed.authoritySignature,
     );
     if (!valid) {
+      await _failResponse(body.responseId, 'authority_signature_rejected');
       _metric(
         'authority_signature_rejected',
         detail: 'cryptographic_verification',
       );
       return;
     }
+    final knownEvent = await isKnownSosEvent(body.replyToEventId);
+    final locallyAuthored =
+        !knownEvent &&
+        (await isLocallyAuthoredSosEvent?.call(body.replyToEventId) ?? false);
     if (utf8.encode(body.messageText).length >
             ReturnProtocol.maxMessageUtf8Bytes ||
-        !(await isKnownSosEvent(body.replyToEventId))) {
+        (!knownEvent && !locallyAuthored)) {
+      await _failResponse(body.responseId, 'event_or_message_guard');
       _metric('authority_signature_rejected', detail: 'event_or_message_guard');
       return;
     }
@@ -205,6 +288,17 @@ final class ReturnRouter {
       _metric('response_duplicate_drop');
     }
     await _enqueueDeliveryReceipt(body, envelope.objectId);
+    await _progress(
+      AuthorityResponseProgress(
+        responseId: body.responseId,
+        state: 'SENDER_DELIVERED',
+        returnHops: envelope.hopCount,
+        receiptId: '${body.responseId}:$localEphemeralId',
+        replyToEventId: body.replyToEventId,
+        senderEphemeralId: localEphemeralId,
+        receiptCreatedAtMs: clockMs(),
+      ),
+    );
   }
 
   Future<void> _enqueueDeliveryReceipt(
@@ -258,34 +352,59 @@ final class ReturnRouter {
     int? ingressEphemeralId,
   }) async {
     if (envelope.hopCount >= envelope.hopLimit) {
-      await responses.markExpired(responseId);
+      await _expireResponse(responseId, detail: 'hop_limit');
       _metric('response_expired', detail: 'hop_limit');
       return;
     }
-    final routesForResponse = (await routes.candidates(
-      siteId: envelope.siteId,
-      eventId: envelope.eventId,
-      originEphemeralId: _destinationFromPayload(signedPayload),
-      nowMs: nowMs,
-    )).where((route) => route.previousPeerEphemeralId != ingressEphemeralId);
-    final candidates = routesForResponse.toList();
+    final destinationEphemeralId = _destinationFromPayload(signedPayload);
+    var candidates =
+        (await routes.candidates(
+              siteId: envelope.siteId,
+              eventId: envelope.eventId,
+              originEphemeralId: destinationEphemeralId,
+              nowMs: nowMs,
+            ))
+            .where(
+              (route) => route.previousPeerEphemeralId != ingressEphemeralId,
+            )
+            .toList();
+    if (candidates.isEmpty) {
+      candidates =
+          (await routes.candidatesForDestination(
+                siteId: envelope.siteId,
+                originEphemeralId: destinationEphemeralId,
+                nowMs: nowMs,
+              ))
+              .where(
+                (route) => route.previousPeerEphemeralId != ingressEphemeralId,
+              )
+              .toList();
+      if (candidates.isNotEmpty) {
+        _metric('reverse_route_event_converged', detail: 'destination_scoped');
+      }
+    }
     for (var index = 0; index < candidates.length; index++) {
       final route = candidates[index];
-      final ok = await _sendNextHop(envelope, route.previousPeerEphemeralId);
+      final ok = await _sendRoute(envelope, route);
       if (ok) {
         await routes.markReachable(route, nowMs: nowMs);
-        await responses.markForwarding(
-          responseId,
-          index == 0
-              ? ReturnRouteMode.reverseCache.name
-              : ReturnRouteMode.alternateCache.name,
+        final routeMode = index == 0
+            ? ReturnRouteMode.reverseCache.name
+            : ReturnRouteMode.alternateCache.name;
+        await responses.markForwarding(responseId, routeMode);
+        await _progress(
+          AuthorityResponseProgress(
+            responseId: responseId,
+            state: 'FORWARDING',
+            routeMode: routeMode,
+            returnHops: envelope.hopCount + 1,
+            retryCount: (await responses.get(responseId))?.attempts ?? 0,
+          ),
         );
         _metric(
           'response_forwarded',
           value: envelope.hopCount + 1,
-          detail: index == 0
-              ? ReturnRouteMode.reverseCache.name
-              : ReturnRouteMode.alternateCache.name,
+          detail: routeMode,
         );
         return;
       }
@@ -309,17 +428,116 @@ final class ReturnRouter {
           responseId,
           ReturnRouteMode.fallback.name,
         );
+        await _progress(
+          AuthorityResponseProgress(
+            responseId: responseId,
+            state: 'FORWARDING',
+            routeMode: ReturnRouteMode.fallback.name,
+            returnHops: envelope.hopCount + 1,
+            retryCount: (await responses.get(responseId))?.attempts ?? 0,
+          ),
+        );
         _metric('fallback_forwarded', value: envelope.hopCount + 1);
         return;
       }
     }
-    final nextAttempt = nowMs + config.backoffMs.first;
+    final current = await responses.get(responseId);
+    final retryCount = (current?.attempts ?? 0) + 1;
+    await responses.incrementAttempt(responseId);
+    final maxRetries = max(1, config.backoffMs.length);
+    if (retryCount >= maxRetries) {
+      await responses.markFailed(responseId, 'no eligible return peer');
+      await _progress(
+        AuthorityResponseProgress(
+          responseId: responseId,
+          state: 'FAILED',
+          routeMode: ReturnRouteMode.retry.name,
+          returnHops: envelope.hopCount,
+          retryCount: retryCount,
+          error: 'no_eligible_return_route',
+        ),
+      );
+      _metric('reverse_route_failed', detail: 'bounded_retry_exhausted');
+      return;
+    }
+    final backoffIndex = min(retryCount - 1, config.backoffMs.length - 1);
+    final nextAttempt = nowMs + config.backoffMs[backoffIndex];
     await responses.markRetry(
       responseId,
       nextAttemptAtMs: nextAttempt,
       error: 'no eligible return peer',
     );
+    await _progress(
+      AuthorityResponseProgress(
+        responseId: responseId,
+        state: 'MESH_QUEUED',
+        routeMode: ReturnRouteMode.retry.name,
+        returnHops: envelope.hopCount,
+        retryCount: retryCount,
+        error: 'no_eligible_return_route',
+      ),
+    );
     _metric('reverse_route_miss', detail: 'durable_retry');
+  }
+
+  Future<void> _expireResponse(
+    String responseId, {
+    required String detail,
+  }) async {
+    await responses.markExpired(responseId);
+    await _progress(
+      AuthorityResponseProgress(
+        responseId: responseId,
+        state: 'EXPIRED',
+        error: detail,
+      ),
+    );
+  }
+
+  Future<void> _failResponse(String responseId, String detail) async {
+    await responses.markFailed(responseId, detail);
+    await _progress(
+      AuthorityResponseProgress(
+        responseId: responseId,
+        state: 'FAILED',
+        error: detail,
+      ),
+    );
+  }
+
+  Future<void> _progress(AuthorityResponseProgress progress) async {
+    _metric('response_progress_reported', detail: progress.state);
+    final callback = onProgress;
+    if (callback == null) return;
+    try {
+      await callback(progress);
+    } catch (_) {
+      // Telemetry cannot interrupt cryptographic delivery or retry handling.
+      _metric('response_progress_callback_failed');
+    }
+  }
+
+  Future<bool> _sendRoute(MeshEnvelope envelope, ReverseRoute route) async {
+    if (await _sendNextHop(envelope, route.previousPeerEphemeralId)) {
+      return true;
+    }
+    final hint = route.previousPeerHint;
+    final connector = connectToPeerHint;
+    if (hint == null || hint.isEmpty || connector == null) return false;
+    try {
+      _metric('reverse_route_reconnect_started');
+      await connector(hint, route.previousPeerEphemeralId);
+      final sent = await _sendNextHop(envelope, route.previousPeerEphemeralId);
+      _metric(
+        sent
+            ? 'reverse_route_reconnect_succeeded'
+            : 'reverse_route_reconnect_unavailable',
+      );
+      return sent;
+    } catch (_) {
+      _metric('reverse_route_reconnect_failed');
+      return false;
+    }
   }
 
   Future<bool> _sendNextHop(MeshEnvelope envelope, int peerEphemeralId) async {

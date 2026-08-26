@@ -104,6 +104,37 @@ final class ReverseRouteRepository {
     nowMs: nowMs ?? clockMs(),
   );
 
+  /// Event-agnostic candidates for one destination inside a site.
+  ///
+  /// The control room can converge several mesh objects onto a single incident
+  /// ID (compact alert upgrades), so an authority response may quote an event
+  /// ID that differs from the envelope the route was learned from. Routing
+  /// still has to reach the same origin device, so this fallback keeps the
+  /// site/destination scope and the same bounded candidate cap.
+  Future<List<ReverseRoute>> candidatesForDestination({
+    required String siteId,
+    required int originEphemeralId,
+    int? nowMs,
+  }) {
+    final now = nowMs ?? clockMs();
+    return (db.select(db.reverseRoutes)
+          ..where(
+            (t) =>
+                t.siteId.equals(siteId) &
+                t.originEphemeralId.equals(originEphemeralId) &
+                t.expiresAtMs.isBiggerThanValue(now),
+          )
+          ..orderBy([
+            (t) => OrderingTerm.asc(t.consecutiveFailures),
+            (t) => OrderingTerm.desc(t.lastReachableAtMs),
+            (t) => OrderingTerm.desc(t.learnedAtMs),
+            (t) => OrderingTerm.asc(t.observedForwardHopCount),
+            (t) => OrderingTerm.asc(t.previousPeerEphemeralId),
+          ])
+          ..limit(config.maxRouteCandidates))
+        .get();
+  }
+
   Future<void> markReachable(ReverseRoute route, {int? nowMs}) async {
     await (db.update(db.reverseRoutes)..where(
           (t) =>
@@ -210,7 +241,6 @@ final class AuthorityResponseRepository {
             ..where(
               (t) =>
                   (t.state.equals('READY') | t.state.equals('RETRY')) &
-                  t.expiresAtMs.isBiggerThanValue(nowMs ?? clockMs()) &
                   (t.nextAttemptAtMs.isNull() |
                       t.nextAttemptAtMs.isSmallerOrEqualValue(
                         nowMs ?? clockMs(),

@@ -8,6 +8,14 @@
 4. The dashboard should show `SIGNED`, then `MESH_QUEUED`/`FORWARDING` as the gateway and relays work.
 5. Do not tell a caller the message arrived until the timeline reaches `RECEIPT_AT_DASHBOARD`. That state requires the sender's verified response-delivery receipt.
 
+
+### Lifecycle progress contract
+
+The gateway reports additive progress to `POST /v1/responses/{response_id}/progress` using the gateway credential. The accepted states are `GATEWAY_RECEIVED`, `MESH_QUEUED`, `FORWARDING`, `SENDER_DELIVERED`, `EXPIRED`, and `FAILED`; updates are idempotent and cannot move backward. `FORWARDING` may include `route_mode` (`liveConnection`, `reverseCache`, `alternateCache`, `fallback`, or `retry`), bounded `return_hops`, `retry_count`, and a privacy-safe error code.
+
+`SENDER_DELIVERED` is accepted only with matching sender receipt evidence (`receipt_id`, event ID, and destination ephemeral ID). It is still not the final dashboard state: the existing validated receipt upload must transition the response to `RECEIPT_AT_DASHBOARD`. A gateway HTTP command acknowledgement only establishes custody/queueing.
+
+For the selected three-phone topology, the gateway injects responder updates into the foreground `ReturnRouter`, which targets the authenticated reverse cache (`C → B → A`). If the gateway is also the destination, the same signature-verification, inbox-persistence, and receipt path is used locally. If no route is available, bounded retry is reported; exhaustion is `FAILED`, and TTL/hop expiry is `EXPIRED`.
 ## Gateway health
 
 - `SIGNED` with no `MESH_QUEUED`: verify the gateway phone is in event mode, has the active site, and has a non-empty gateway URL/key. The command poller uses a long-poll endpoint and retries after network errors.

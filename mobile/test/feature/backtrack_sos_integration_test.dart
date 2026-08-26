@@ -66,6 +66,7 @@ void main() {
       var commandServed = false;
       var gatewayAcknowledged = false;
       final receiptUploads = <Map<String, Object?>>[];
+      final progressStates = <String>[];
       final bridge = GatewayBridge(
         baseUrl: Uri.parse('https://control.test'),
         demoKey: 'gateway-key',
@@ -100,6 +101,11 @@ void main() {
               }),
               200,
             );
+          }
+          if (request.url.path.endsWith('/progress')) {
+            final bodyJson = jsonDecode(request.body) as Map<String, dynamic>;
+            progressStates.add('${bodyJson['state']}');
+            return http.Response('{"ok":true}', 200);
           }
           if (request.url.path.endsWith('/received')) {
             gatewayAcknowledged = true;
@@ -149,6 +155,7 @@ void main() {
         gatewayDatabase,
       ).get(body.responseId);
       expect(gatewayAcknowledged, isTrue);
+      expect(progressStates, contains('MESH_QUEUED'));
       expect(queued?.state, 'READY');
       expect(
         receiptUploads,
@@ -200,6 +207,7 @@ void main() {
         ),
       );
 
+      expect(progressStates, contains('SENDER_DELIVERED'));
       expect(receiptUploads, hasLength(1));
       expect(receiptUploads.single, {
         'receipt_id': '${body.responseId}:${body.destinationEphemeralId}',

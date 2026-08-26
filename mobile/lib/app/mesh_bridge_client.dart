@@ -403,6 +403,7 @@ class MeshBridgeClient {
     if (!await FlutterForegroundTask.isRunningService) {
       throw StateError('event mode is not running');
     }
+
     final pending = Completer<void>();
     _pendingSubmissions[envelope.objectId] = pending;
     _submissionTimers[envelope.objectId] = Timer(
@@ -426,6 +427,57 @@ class MeshBridgeClient {
     } finally {
       _submissionTimers.remove(envelope.objectId)?.cancel();
       _pendingSubmissions.remove(envelope.objectId);
+    }
+  }
+
+  Future<void> _handleAuthorityResponseProgress(Map data) async {
+    final bridge = _gatewayBridge;
+    final localEphemeralId = _localEphemeralId;
+    final responseId = data['responseId'] as String?;
+    final state = data['state'] as String?;
+    if (bridge == null ||
+        localEphemeralId == null ||
+        responseId == null ||
+        state == null) {
+      return;
+    }
+    int? integer(Object? value) =>
+        value is num ? value.toInt() : int.tryParse('$value');
+    final senderEphemeralId = integer(data['senderEphemeralId']);
+    try {
+      await bridge.reportAuthorityResponseProgress(
+        responseId: responseId,
+        gatewaySessionId: localEphemeralId.toString(),
+        state: state,
+        routeMode: data['routeMode'] as String?,
+        returnHops: integer(data['returnHops']),
+        retryCount: integer(data['retryCount']),
+        error: data['error'] as String?,
+        receiptId: data['receiptId'] as String?,
+        replyToEventId: data['replyToEventId'] as String?,
+        senderEphemeralId: senderEphemeralId,
+      );
+      // A gateway that is also the destination does not receive its own ACK
+      // through the mesh. The receipt was durably created by ReturnRouter, so
+      // upload it directly while the normal receipt sweep remains the restart
+      // fallback.
+      if (state == 'SENDER_DELIVERED' &&
+          data['receiptId'] is String &&
+          data['replyToEventId'] is String &&
+          senderEphemeralId != null) {
+        await bridge.uploadResponseReceipt(
+          responseId: responseId,
+          receiptId: data['receiptId'] as String,
+          replyToEventId: data['replyToEventId'] as String,
+          senderEphemeralId: senderEphemeralId,
+          createdAtMs:
+              integer(data['receiptCreatedAtMs']) ??
+              DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+    } catch (_) {
+      // The durable gateway response/receipt loops retry progress after a
+      // transient network failure; mesh processing must continue regardless.
     }
   }
 
@@ -580,6 +632,8 @@ class MeshBridgeClient {
           }
         }
         unawaited(_outbox?.onMetrics(decoded) ?? Future.value());
+      case 'authority_response_progress':
+        unawaited(_handleAuthorityResponseProgress(data));
       case 'mesh_received':
         final receivedJson = data['received'];
         if (receivedJson is! Map) return;

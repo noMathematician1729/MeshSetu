@@ -5,7 +5,12 @@ import path from 'node:path'
 process.env.NODE_ENV = 'test'
 process.env.DATABASE_URL = ''
 
-const { encodeAndSignResponderUpdate, verifyBodySignature } = await import('./authority_signing.js')
+const {
+  authorityKeyId,
+  authorityPublicKeyJwk,
+  encodeAndSignResponderUpdate,
+  verifyBodySignature,
+} = await import('./authority_signing.js')
 
 describe('authority response signing', () => {
   afterEach(() => {
@@ -43,5 +48,15 @@ describe('authority response signing', () => {
       responseId: 'too-long', replyToEventId: 'event', destinationEphemeralId: '1', type: 'SAFETY_GUIDANCE',
       messageText: '🚨'.repeat(65), createdAtMs: 1, expiresAtMs: 2, siteId: 'site',
     })).rejects.toThrow('256 UTF-8 bytes')
+  })
+
+  it('exposes the stable local-development trust anchor', () => {
+    expect(authorityKeyId()).toBe('meshsetu-authority-dev-v1')
+    expect(authorityPublicKeyJwk()).toEqual({
+      kty: 'EC',
+      crv: 'P-256',
+      x: 'sPFdOd84-QAzn084ou-s7xyKKvYo6_K6wOOjcjLbPRw',
+      y: 'M6Sc8H_oAneoBDAdYZUU_CtcaMB_z3vourkslIQ9DDk',
+    })
   })
 })

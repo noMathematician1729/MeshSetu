@@ -367,6 +367,49 @@ class GatewayBridge {
     );
   }
 
+  /// Reports a bounded, additive lifecycle update for a signed authority
+  /// response. Gateway custody is deliberately separate from sender delivery:
+  /// SENDER_DELIVERED must carry the sender-generated receipt identity and the
+  /// existing receipt endpoint remains the only path to the final dashboard
+  /// state.
+  Future<bool> reportAuthorityResponseProgress({
+    required String responseId,
+    required String gatewaySessionId,
+    required String state,
+    String? routeMode,
+    int? returnHops,
+    int? retryCount,
+    String? error,
+    String? receiptId,
+    String? replyToEventId,
+    int? senderEphemeralId,
+  }) async {
+    final response = await _client
+        .post(
+          baseUrl.resolve(
+            '/v1/responses/${Uri.encodeComponent(responseId)}/progress',
+          ),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({
+            'state': state,
+            'gateway_session_id': gatewaySessionId,
+            if (routeMode != null) 'route_mode': routeMode,
+            if (returnHops != null) 'return_hops': returnHops,
+            if (retryCount != null) 'retry_count': retryCount,
+            if (error != null) 'error': error,
+            if (receiptId != null) 'receipt_id': receiptId,
+            if (replyToEventId != null) 'reply_to_event_id': replyToEventId,
+            if (senderEphemeralId != null)
+              'sender_ephemeral_id': senderEphemeralId.toString(),
+          }),
+        )
+        .timeout(requestTimeout);
+    return response.statusCode >= 200 && response.statusCode < 300;
+  }
+
   Future<bool> acknowledgeAuthorityCommand({
     required String gatewaySessionId,
     required String responseId,

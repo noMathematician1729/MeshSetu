@@ -126,6 +126,8 @@ void main() {
     Future<bool> Function(String eventId)? isKnown,
     void Function(String kind, {String? detail, int? value})? onMetric,
     VerifiedResponseListener? onVerifiedResponse,
+    AuthorityResponseProgressListener? onProgress,
+    PeerHintConnector? connectToPeerHint,
   }) async {
     return ReturnRouter(
       transport: coordinator,
@@ -136,6 +138,8 @@ void main() {
       isKnownSosEvent: isKnown ?? ((_) async => true),
       onVerifiedResponse: onVerifiedResponse,
       onMetric: onMetric,
+      onProgress: onProgress,
+      connectToPeerHint: connectToPeerHint,
       clockMs: () => 100,
     );
   }
@@ -156,24 +160,29 @@ void main() {
     );
   }
 
-  Future<void> learnRoute(ReverseRouteRepository routes, int peerEphemeralId) =>
-      routes.observeValidSos(
-        envelope: MeshEnvelope(
-          objectId: 8000 + peerEphemeralId,
-          eventId: signed.body.replyToEventId,
-          siteId: signed.body.siteId,
-          roomId: 'public',
-          createdAtMs: 1,
-          expiresAtMs: signed.body.expiresAtMs,
-          hopCount: 1,
-          hopLimit: 6,
-          priority: PriorityBand.p0Critical,
-          payloadType: PayloadType.structuredSos,
-          payload: Uint8List.fromList([1]),
-          originEphemeralId: signed.body.destinationEphemeralId,
-        ),
-        previousPeerEphemeralId: peerEphemeralId,
-      );
+  Future<void> learnRoute(
+    ReverseRouteRepository routes,
+    int peerEphemeralId, {
+    String? eventId,
+    String? previousPeerHint,
+  }) => routes.observeValidSos(
+    envelope: MeshEnvelope(
+      objectId: 8000 + peerEphemeralId,
+      eventId: eventId ?? signed.body.replyToEventId,
+      siteId: signed.body.siteId,
+      roomId: 'public',
+      createdAtMs: 1,
+      expiresAtMs: signed.body.expiresAtMs,
+      hopCount: 1,
+      hopLimit: 6,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([1]),
+      originEphemeralId: signed.body.destinationEphemeralId,
+    ),
+    previousPeerEphemeralId: peerEphemeralId,
+    previousPeerHint: previousPeerHint,
+  );
 
   test(
     'forwards through the freshest reverse route and persists state',
@@ -311,6 +320,221 @@ void main() {
       expect(delivered, [signed.body.messageText]);
       expect(inbox, hasLength(1));
       expect(receipts, hasLength(1));
+      await coordinator.stop();
+      await db.close();
+    },
+  );
+
+  test(
+    'routes an injected gateway response through local verification and receipt progress',
+    () async {
+      final db = database();
+      final coordinator = transport();
+      final progress = <AuthorityResponseProgress>[];
+      final router = await buildRouter(
+        db,
+        coordinator,
+        localEphemeralId: signed.body.destinationEphemeralId,
+        onProgress: progress.add,
+      );
+
+      await router.handleInjectedResponderUpdate(
+        responseEnvelope(objectId: 7008),
+      );
+
+      expect(
+        progress.map((event) => event.state),
+        contains('SENDER_DELIVERED'),
+      );
+      expect(
+        progress
+            .singleWhere((event) => event.state == 'SENDER_DELIVERED')
+            .receiptId,
+        '${signed.body.responseId}:${signed.body.destinationEphemeralId}',
+      );
+      expect(await (db.select(db.authorityInbox)).get(), hasLength(1));
+      expect(await (db.select(db.responseReceipts)).get(), hasLength(1));
+      await coordinator.stop();
+      await db.close();
+    },
+  );
+
+  test(
+    'uses a destination-scoped reverse route when incident IDs converged',
+    () async {
+      final db = database();
+      final coordinator = transport();
+      final link = _FakeLink();
+      await registerPeer(coordinator, 'sender-peer', 704, link);
+      final routes = ReverseRouteRepository(db, clockMs: () => 100);
+      await learnRoute(routes, 704, eventId: 'wire-event-before-convergence');
+      final router = await routerFor(db, coordinator, routes: routes);
+      final original = responseEnvelope(objectId: 7010);
+      final converged = MeshEnvelope(
+        objectId: original.objectId,
+        eventId: 'dashboard-incident-id',
+        siteId: original.siteId,
+        roomId: original.roomId,
+        createdAtMs: original.createdAtMs,
+        expiresAtMs: original.expiresAtMs,
+        hopCount: original.hopCount,
+        hopLimit: original.hopLimit,
+        priority: original.priority,
+        payloadType: original.payloadType,
+        payload: original.payload,
+        originEphemeralId: original.originEphemeralId,
+        traceId: original.traceId,
+      );
+
+      await router.handleResponderUpdate(
+        envelope: converged,
+        fromPeerId: 'gateway-peer',
+        encryptedBytes: Uint8List.fromList([1]),
+      );
+
+      expect(link.sentFrames, isNotEmpty);
+      expect(
+        (await AuthorityResponseRepository(
+          db,
+        ).get(signed.body.responseId))?.state,
+        'FORWARDING',
+      );
+      await coordinator.stop();
+      await db.close();
+    },
+  );
+
+  test(
+    'reconnects through a persisted peer hint before retrying a reverse route',
+    () async {
+      final db = database();
+      final coordinator = transport();
+      final routes = ReverseRouteRepository(db, clockMs: () => 100);
+      await learnRoute(routes, 705, previousPeerHint: 'sender-device');
+      final link = _FakeLink();
+      final reconnects = <String>[];
+      final router = await buildRouter(
+        db,
+        coordinator,
+        connectToPeerHint: (hint, expectedEphemeralId) async {
+          reconnects.add(hint);
+          await registerPeer(coordinator, hint, expectedEphemeralId, link);
+        },
+      );
+
+      await router.handleResponderUpdate(
+        envelope: responseEnvelope(objectId: 7011),
+        fromPeerId: 'gateway-peer',
+        encryptedBytes: Uint8List.fromList([1]),
+      );
+
+      expect(reconnects, ['sender-device']);
+      expect(link.sentFrames, isNotEmpty);
+      expect(
+        (await AuthorityResponseRepository(
+          db,
+        ).get(signed.body.responseId))?.routeMode,
+        ReturnRouteMode.reverseCache.name,
+      );
+      await coordinator.stop();
+      await db.close();
+    },
+  );
+
+  test('reports no-route as queued retry rather than forwarding', () async {
+    final db = database();
+    final coordinator = transport();
+    final progress = <AuthorityResponseProgress>[];
+    final router = await buildRouter(db, coordinator, onProgress: progress.add);
+
+    await router.handleResponderUpdate(
+      envelope: responseEnvelope(objectId: 7012),
+      fromPeerId: 'gateway-peer',
+      encryptedBytes: Uint8List.fromList([1]),
+    );
+
+    expect(progress, hasLength(1));
+    expect(progress.single.state, 'MESH_QUEUED');
+    expect(progress.single.routeMode, ReturnRouteMode.retry.name);
+    expect(progress.single.error, 'no_eligible_return_route');
+    expect(
+      (await AuthorityResponseRepository(
+        db,
+      ).get(signed.body.responseId))?.state,
+      'RETRY',
+    );
+    await coordinator.stop();
+    await db.close();
+  });
+
+  test('reports bounded no-route retry and terminal failure', () async {
+    final db = database();
+    final coordinator = transport();
+    final progress = <AuthorityResponseProgress>[];
+    final router = ReturnRouter(
+      transport: coordinator,
+      routes: ReverseRouteRepository(db, clockMs: () => 100),
+      responses: AuthorityResponseRepository(db, clockMs: () => 100),
+      localEphemeralId: 999,
+      trustSnapshot: () async => trust,
+      isKnownSosEvent: (_) async => true,
+      config: const ReturnChannelConfig(backoffMs: [0, 0, 0, 0]),
+      clockMs: () => 100,
+      onProgress: progress.add,
+    );
+
+    await router.handleResponderUpdate(
+      envelope: responseEnvelope(objectId: 7009),
+      fromPeerId: 'ingress-peer',
+      encryptedBytes: Uint8List.fromList([1]),
+    );
+    for (var attempt = 0; attempt < 3; attempt++) {
+      await router.retryDue();
+    }
+
+    expect(progress.map((event) => event.routeMode), contains('retry'));
+    expect(progress.last.state, 'FAILED');
+    expect(progress.last.error, 'no_eligible_return_route');
+    expect(
+      (await AuthorityResponseRepository(
+        db,
+      ).get(signed.body.responseId))?.state,
+      'FAILED',
+    );
+    await coordinator.stop();
+    await db.close();
+  });
+
+  test(
+    'reports the authority site guard without logging key material',
+    () async {
+      final db = database();
+      final metrics = <String>[];
+      final coordinator = transport();
+      final mismatchedTrust = AuthorityTrustSnapshot(
+        siteId: 'another-event-site',
+        keyId: trust.keyId,
+        publicKey: trust.publicKey,
+      );
+      final router = await buildRouter(
+        db,
+        coordinator,
+        localEphemeralId: signed.body.destinationEphemeralId,
+        trustSnapshot: () async => mismatchedTrust,
+        onMetric: (kind, {detail, value}) =>
+            metrics.add('$kind${detail == null ? '' : ':$detail'}'),
+      );
+
+      await router.handleResponderUpdate(
+        envelope: responseEnvelope(objectId: 7013),
+        fromPeerId: 'relay-peer',
+        encryptedBytes: Uint8List.fromList([1]),
+      );
+
+      expect(
+        metrics,
+        contains('authority_signature_rejected:authority_trust_rejected_site'),
+      );
       await coordinator.stop();
       await db.close();
     },

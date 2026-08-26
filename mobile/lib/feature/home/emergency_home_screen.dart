@@ -28,6 +28,10 @@ class EmergencyHomeScreen extends StatelessWidget {
     required this.onDescribe,
     required this.onCreateRoom,
     required this.onJoinRoom,
+    this.authorityResponseType,
+    this.authorityResponseMessage,
+    this.authorityRejectionMessage,
+    this.onToggleEventMode,
   });
 
   final bool eventModeActive;
@@ -42,6 +46,10 @@ class EmergencyHomeScreen extends StatelessWidget {
   final VoidCallback onDescribe;
   final VoidCallback onCreateRoom;
   final VoidCallback onJoinRoom;
+  final String? authorityResponseType;
+  final String? authorityResponseMessage;
+  final String? authorityRejectionMessage;
+  final VoidCallback? onToggleEventMode;
 
   @override
   Widget build(BuildContext context) {
@@ -70,6 +78,18 @@ class EmergencyHomeScreen extends StatelessWidget {
                         children: [
                           const MeshMicroLabel('MeshSetu'),
                           const Spacer(),
+                          if (onToggleEventMode != null)
+                            IconButton(
+                              tooltip: eventModeActive
+                                  ? 'Stop event mode'
+                                  : 'Start event mode',
+                              onPressed: onToggleEventMode,
+                              icon: Icon(
+                                eventModeActive
+                                    ? Icons.bluetooth_disabled
+                                    : Icons.bluetooth_searching,
+                              ),
+                            ),
                           IconButton(
                             tooltip: 'Open profile',
                             onPressed: onProfile,
@@ -118,6 +138,65 @@ class EmergencyHomeScreen extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      if (authorityResponseMessage?.trim().isNotEmpty ??
+                          false) ...[
+                        const MeshSectionTitle(
+                          'Control room response',
+                          subtitle: 'Verified response received',
+                        ),
+                        const SizedBox(height: MeshSpace.sm),
+                        MeshCard(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.verified_user_outlined,
+                                color: palette.ember,
+                              ),
+                              const SizedBox(width: MeshSpace.md),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      authorityResponseType ?? 'Update',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelLarge,
+                                    ),
+                                    const SizedBox(height: MeshSpace.xs),
+                                    Text(authorityResponseMessage!.trim()),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: MeshSpace.lg),
+                      ] else if (authorityRejectionMessage?.trim().isNotEmpty ??
+                          false) ...[
+                        const MeshSectionTitle(
+                          'Control room response',
+                          subtitle: 'Could not be verified',
+                        ),
+                        const SizedBox(height: MeshSpace.sm),
+                        MeshCard(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.error_outline,
+                                color: Theme.of(context).colorScheme.error,
+                              ),
+                              const SizedBox(width: MeshSpace.md),
+                              Expanded(
+                                child: Text(authorityRejectionMessage!.trim()),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: MeshSpace.lg),
+                      ],
                       MeshActionTile(
                         compact: true,
                         icon: _iconFor(emergencyType),
