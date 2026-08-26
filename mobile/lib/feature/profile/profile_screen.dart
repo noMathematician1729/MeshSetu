@@ -236,25 +236,42 @@ class _ProfileContent extends ConsumerWidget {
         SttLanguage.fromDisplayName(profile.language) ?? SttLanguage.english;
     final selected = await showModalBottomSheet<SttLanguage>(
       context: context,
+      isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(MeshSpace.md),
-              child: Text(
-                sheetContext.meshL10n.text('Preferred language'),
-                style: Theme.of(sheetContext).textTheme.titleLarge,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: .7,
+        minChildSize: .35,
+        maxChildSize: .92,
+        expand: false,
+        builder: (sheetContext, scrollController) => SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(MeshSpace.md),
+                child: Text(
+                  sheetContext.meshL10n.text('Preferred language'),
+                  style: Theme.of(sheetContext).textTheme.titleLarge,
+                ),
               ),
-            ),
-            for (final language in SttLanguage.values)
-              ListTile(
-                title: Text(sheetContext.meshL10n.languageName(language.code)),
-                trailing: language == current ? const Icon(Icons.check) : null,
-                onTap: () => Navigator.of(sheetContext).pop(language),
+              Expanded(
+                child: ListView(
+                  controller: scrollController,
+                  children: [
+                    for (final language in SttLanguage.values)
+                      ListTile(
+                        title: Text(
+                          sheetContext.meshL10n.languageName(language.code),
+                        ),
+                        trailing: language == current
+                            ? const Icon(Icons.check)
+                            : null,
+                        onTap: () => Navigator.of(sheetContext).pop(language),
+                      ),
+                  ],
+                ),
               ),
-          ],
+            ],
+          ),
         ),
       ),
     );
