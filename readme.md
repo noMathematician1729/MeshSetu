@@ -1,4 +1,4 @@
-# MeshSetu
+# MeshSetu - Team -1x Devs.
 
 Android-first, offline emergency communication over a BLE store-and-forward overlay.
 
@@ -151,54 +151,7 @@ Two features exist in this repository that are not part of the v1.0 contract:
 | Hardware SOS gestures | `mobile/android/.../EmergencyGestureAccessibilityService.kt`, `app/emergency_gestures.dart` | Volume-key patterns trigger a typed, cancelable SOS countdown. Beyond the frozen spec. |
 | Emergency-contact SMS | `admin/server/src/twilio_sms.ts`, `sms_delivery.ts`, `fast2sms.ts` | Twilio primary path with a delivery ledger and idempotency; Fast2SMS fallback. Beyond the frozen spec. |
 
-## Non-goals
 
-Carried over from `context.md` §1.2 — these are explicit, not oversights:
-
-- No claim of Bluetooth SIG Mesh certification. This is an application-layer BLE store-and-forward overlay built on Android scan/advertise + GATT.
-- No live voice call or continuous audio streaming over the emergency mesh — voice is captured, compressed, chunked, and store-and-forwarded.
-- No exact crowd headcount, facial recognition, identity tracking, or autonomous life-critical dispatch.
-- No guarantee of perfect background operation on every Android OEM; active event mode uses a visible connected-device foreground service.
-- No production-grade public-key enrollment ceremony; the demo provisioning path is documented and isolated from the production security design.
-
-## Safety invariants (context.md §1.3)
-
-These are the non-negotiable behaviors the implementation is built around:
-
-| Invariant | Rule |
-|---|---|
-| Manual SOS is never blocked | STT/triage exceptions degrade to raw SOS + audio; the send action persists before inference completes. |
-| SOS always outranks chat/audio | Scheduler priorities are enforced centrally; room chat cannot starve emergency metadata. |
-| Uncertainty is visible | STT confidence, triage confidence, and localization uncertainty are fields, not hidden model internals. |
-| No live-stream assumption | Voice clips are duration-capped and store-and-forward; transfer status is explicit. |
-| Human authority remains final | Triage/precursor outputs recommend; they do not dispatch or open gates automatically. |
-| Graceful degradation | If MTU, audio codec, STT, or beacon data is unavailable, compact SOS transport continues. |
-
-## Known gaps against the frozen spec
-
-Not yet implemented:
-
-- **Zone density estimation** (§14.3) — no `estimateDensity` equivalent in the codebase.
-- **Zone precursor scoring** (§14.4) — no `precursorScore`/`ZoneSignals`; the dashboard has no advisory-only precursor panel.
-- **ML triage classifier** (§13.4–13.6) — triage is deterministic rules only; no trained classifier or model asset.
-- **Signed responder updates back into the mesh** (§15.4) — operator ACK exists in the dashboard; a signed authority command flowing back into the mesh as a high-priority control event is not implemented.
-- **Benchmark tooling** (§4.1, §12.5–12.6) — no `log_parser.py`/`packet_simulator.py`; no recorded STT latency/keyword-recall table on real devices.
-
-Implemented but not production-hardened:
-
-- **Shared-site crypto rather than per-room keys** (§10.2, §16.1, §22.1) — restricted rooms currently use site-level encryption, so a public participant should not be assumed unable to decrypt responder traffic.
-- **Mutable hop count inside the authenticated envelope** (§8.6) — the spec calls for an immutable origin-signed envelope wrapped in mutable relay metadata; this build decrypts/re-encrypts by trusted site members instead.
-- **No production enrollment ceremony** — the demo manifest/join path is documented and isolated, not a signed per-device provisioning flow.
-- **Gateway auth** (§15.1) — protected by a shared demo key; needs per-device credentials and rotation before field use.
-
-Requires physical multi-phone radio trials, not closeable by a unit-test suite (§18, §21):
-
-- 10+ consecutive 2-hop offline relay trials with mobile data and Wi-Fi disabled.
-- Priority preemption proof on real radio (inject a P0 SOS mid voice-transfer).
-- Voice integrity path under real chunk loss/corruption.
-- Hardware gesture flow end-to-end on target OEM devices.
-- STT load time, inference latency, memory, and thermals on target devices.
-- Battery delta over a controlled active-event interval.
 
 ## Build and test
 
@@ -271,16 +224,3 @@ The automated suite uses synthetic BLE links, so it cannot prove radio behavior.
 7. While a voice clip is still transferring, inject a second SOS and confirm it overtakes the remaining voice chunks (§11.6, §18.3 priority preemption proof).
 8. Kill and relaunch the app on the relay phone mid-transfer to confirm the durable outbox resumes rather than silently losing the object.
 
-### What local testing cannot prove
-
-Physical multi-phone radio trials required by `context.md` §18/§21 and not closeable by this repository's unit-test suite: 10+ consecutive two-hop offline relay trials, priority preemption on real radio, voice integrity under real chunk loss/corruption, the hardware gesture flow end-to-end on target OEM devices, STT load time/inference latency/memory/thermals on target devices, and battery delta over a controlled active-event interval.
-
-## Security notes
-
-- The gateway's demo shared key (`MESHSETU_GATEWAY_SECRET` / `x-meshsetu-gateway-key`) is a development credential, not a production authentication scheme — rotate it and replace it with per-device credentials before any real deployment.
-- Restricted rooms currently share site-level encryption rather than separate per-role keys; a public participant should not be assumed unable to decrypt responder traffic in this build.
-- If you have ever pasted real Twilio, Postgres, Cloudinary, or signing credentials into a chat, ticket, or commit while working on this project, rotate them.
-
-## License
-
-Not yet specified.
