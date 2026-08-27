@@ -237,4 +237,4 @@ The automated suite uses synthetic BLE links, so it cannot prove radio behavior.
 7. While a voice clip is still transferring, inject a second SOS and confirm it overtakes the remaining voice chunks (§11.6, §18.3 priority preemption proof).
 8. Kill and relaunch the app on the relay phone mid-transfer to confirm the durable outbox resumes rather than silently losing the object.
 
-+1
++2
