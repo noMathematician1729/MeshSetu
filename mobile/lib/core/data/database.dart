@@ -46,29 +46,171 @@ class InboxEvents extends Table {
   Set<Column> get primaryKey => {objectId};
 }
 
-/// Site manifest loaded via Mesh Code / QR join (Bible §3.1, `feature/join`).
 class SiteManifests extends Table {
   TextColumn get siteId => text()();
   TextColumn get siteName => text()();
   TextColumn get meshCode => text()();
   TextColumn get gatewayHint => text().nullable()();
+  TextColumn get authorityKeyId => text().nullable()();
+  TextColumn get authorityPublicKeyJwk => text().nullable()();
   IntColumn get validFromMs => integer()();
   IntColumn get validUntilMs => integer()();
-  TextColumn get roomsJson => text()(); // encoded List<RoomManifest>
+  TextColumn get roomsJson => text()();
   IntColumn get joinedAtMs => integer()();
 
   @override
   Set<Column> get primaryKey => {siteId};
 }
 
-@DriftDatabase(tables: [OutboxEvents, InboxEvents, SiteManifests])
+/// Site manifest loaded via Mesh Code / QR join (Bible §3.1, `feature/join`).
+/// Local, short-lived reverse-route footprints learned from authenticated SOS
+/// traffic. The composite key permits at most one row per previous peer.
+class ReverseRoutes extends Table {
+  TextColumn get siteId => text()();
+  TextColumn get eventId => text()();
+  IntColumn get originEphemeralId => integer()();
+  IntColumn get previousPeerEphemeralId => integer()();
+  TextColumn get previousPeerHint => text().nullable()();
+  IntColumn get learnedAtMs => integer()();
+  IntColumn get learnedAtElapsedMs => integer().nullable()();
+  IntColumn get expiresAtMs => integer()();
+  IntColumn get observedForwardHopCount => integer()();
+  IntColumn get lastReachableAtMs => integer().nullable()();
+  IntColumn get consecutiveFailures =>
+      integer().withDefault(const Constant(0))();
+  RealColumn get qualityScore => real().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {
+    siteId,
+    eventId,
+    originEphemeralId,
+    previousPeerEphemeralId,
+  };
+}
+
+/// Durable gateway-downlink state. A row is not DELIVERED until a verified
+/// sender-side RESPONSE_DELIVERED receipt reaches the server.
+class AuthorityResponseOutbox extends Table {
+  TextColumn get responseId => text()();
+  TextColumn get replyToEventId => text()();
+  IntColumn get destinationEphemeralId => integer()();
+  BlobColumn get signedPayload => blob()();
+  IntColumn get meshObjectId => integer().nullable()();
+  IntColumn get hopCount => integer().withDefault(const Constant(0))();
+  TextColumn get state => text()();
+  TextColumn get routeMode => text().nullable()();
+  IntColumn get attempts => integer().withDefault(const Constant(0))();
+  TextColumn get attemptedPeerIdsJson =>
+      text().withDefault(const Constant('[]'))();
+  IntColumn get nextAttemptAtMs => integer().nullable()();
+  TextColumn get lastError => text().nullable()();
+  BlobColumn get traceId => blob().nullable()();
+  IntColumn get createdAtMs => integer()();
+  IntColumn get expiresAtMs => integer()();
+
+  @override
+  Set<Column> get primaryKey => {responseId};
+}
+
+/// Only cryptographically verified responses are persisted here. This table
+/// is also the durable display dedupe boundary after process restart.
+class AuthorityInbox extends Table {
+  TextColumn get responseId => text()();
+  TextColumn get replyToEventId => text()();
+  TextColumn get siteId => text()();
+  TextColumn get responseType => text()();
+  TextColumn get messageText => text()();
+  IntColumn get createdAtMs => integer()();
+  IntColumn get expiresAtMs => integer()();
+  IntColumn get receivedAtMs => integer()();
+  BlobColumn get originalTraceId => blob().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {responseId};
+}
+
+class ResponseReceipts extends Table {
+  TextColumn get receiptId => text()();
+  TextColumn get responseId => text()();
+  TextColumn get replyToEventId => text()();
+  IntColumn get senderEphemeralId => integer()();
+  IntColumn get createdAtMs => integer()();
+  TextColumn get state => text().withDefault(const Constant('READY'))();
+
+  @override
+  Set<Column> get primaryKey => {receiptId};
+}
+
+@DriftDatabase(
+  tables: [
+    OutboxEvents,
+    InboxEvents,
+    SiteManifests,
+    ReverseRoutes,
+    AuthorityResponseOutbox,
+    AuthorityInbox,
+    ResponseReceipts,
+  ],
+)
 class MeshDatabase extends _$MeshDatabase {
   MeshDatabase([QueryExecutor? executor]) : super(executor ?? _open());
 
   MeshDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 3;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (m) async {
+      await m.createAll();
+      await _createReturnChannelIndexes(m);
+    },
+    onUpgrade: (m, from, to) async {
+      if (from < 2) {
+        await m.createTable(reverseRoutes);
+        await m.createTable(authorityResponseOutbox);
+        await m.createTable(authorityInbox);
+        await m.createTable(responseReceipts);
+        await _createReturnChannelIndexes(m);
+      }
+      if (from < 3) await _addMissingManifestTrustColumns(m);
+    },
+  );
+
+  Future<void> _addMissingManifestTrustColumns(Migrator m) async {
+    final columns = await m.database
+        .customSelect('PRAGMA table_info(site_manifests)')
+        .get();
+    if (columns.isEmpty) return;
+    final names = {for (final column in columns) column.read<String>('name')};
+    if (!names.contains('authority_key_id')) {
+      await m.addColumn(siteManifests, siteManifests.authorityKeyId);
+    }
+    if (!names.contains('authority_public_key_jwk')) {
+      await m.addColumn(siteManifests, siteManifests.authorityPublicKeyJwk);
+    }
+  }
+
+  Future<void> _createReturnChannelIndexes(Migrator m) async {
+    await m.database.customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_reverse_route_key '
+      'ON reverse_routes(site_id, event_id, origin_ephemeral_id)',
+    );
+    await m.database.customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_reverse_route_expiry '
+      'ON reverse_routes(expires_at_ms)',
+    );
+    await m.database.customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_response_outbox_state '
+      'ON authority_response_outbox(state, expires_at_ms)',
+    );
+    await m.database.customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_authority_inbox_expiry '
+      'ON authority_inbox(expires_at_ms)',
+    );
+  }
 
   static QueryExecutor _open() =>
       driftDatabase(name: 'meshsetu', native: const DriftNativeOptions());

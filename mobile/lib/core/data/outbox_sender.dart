@@ -25,9 +25,11 @@ class OutboxSender {
     required this.localEphemeralId,
     this.maxAttempts = 5,
     this.retryBaseDelay = const Duration(seconds: 1),
+    this.expirySweepInterval = const Duration(seconds: 10),
     this.onDeliveryFailure,
   }) : assert(maxAttempts > 0),
-       assert(retryBaseDelay > Duration.zero);
+       assert(retryBaseDelay > Duration.zero),
+       assert(expirySweepInterval > Duration.zero);
 
   final MeshDatabase _db;
   final Future<void> Function(MeshEnvelope envelope) _send;
@@ -35,6 +37,7 @@ class OutboxSender {
   final int localEphemeralId;
   final int maxAttempts;
   final Duration retryBaseDelay;
+  final Duration expirySweepInterval;
   final void Function(OutboxEvent row, Object error)? onDeliveryFailure;
 
   StreamSubscription<List<OutboxEvent>>? _sub;
@@ -42,11 +45,37 @@ class OutboxSender {
   final Map<String, Timer> _retryTimers = {};
   final Map<String, int> _retryAfterMs = {};
   final Map<String, int> _attempts = {};
+  final Map<int, int> _ackTimeoutAttempts = {};
   bool _disposed = false;
+  Timer? _expirySweepTimer;
+
+  static const int maxAckTimeoutAttempts = 5;
 
   void start() {
     _disposed = false;
     unawaited(_recoverAndListen());
+    _expirySweepTimer?.cancel();
+    _expirySweepTimer = Timer.periodic(
+      expirySweepInterval,
+      (_) => unawaited(_sweepExpiredRelaying()),
+    );
+  }
+
+  Future<void> _sweepExpiredRelaying() async {
+    if (_disposed) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rows =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) =>
+                  t.siteId.equals(siteId) &
+                  t.state.equals('relaying') &
+                  t.expiresAtMs.isSmallerOrEqualValue(now),
+            ))
+            .get();
+    for (final row in rows) {
+      if (row.objectId != null) _ackTimeoutAttempts.remove(row.objectId);
+      await _db.markState(row.eventId, 'expired', now);
+    }
   }
 
   Future<void> _recoverAndListen() async {
@@ -74,11 +103,45 @@ class OutboxSender {
       final objectId = m.objectId;
       if (objectId == null) continue;
       if (m.kind == 'ack') {
+        _ackTimeoutAttempts.remove(objectId);
         await _markByObjectId(objectId, 'acked');
       } else if (m.kind == 'expired') {
+        _ackTimeoutAttempts.remove(objectId);
         await _markByObjectId(objectId, 'expired');
+      } else if (m.kind == 'ack_timeout') {
+        await _handleAckTimeout(objectId);
       }
     }
+  }
+
+  Future<void> _handleAckTimeout(int objectId) async {
+    final row =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) =>
+                  t.siteId.equals(siteId) &
+                  t.objectId.equals(objectId) &
+                  t.state.equals('relaying'),
+            ))
+            .getSingleOrNull();
+    if (row == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (row.expiresAtMs <= now) {
+      _ackTimeoutAttempts.remove(objectId);
+      await _db.markState(row.eventId, 'expired', now);
+      return;
+    }
+    final attempt = (_ackTimeoutAttempts[objectId] ?? 0) + 1;
+    if (attempt >= maxAckTimeoutAttempts) {
+      _ackTimeoutAttempts.remove(objectId);
+      await _db.markState(row.eventId, 'failed', now);
+      onDeliveryFailure?.call(
+        row,
+        StateError('no custody acknowledgement after $attempt attempts'),
+      );
+      return;
+    }
+    _ackTimeoutAttempts[objectId] = attempt;
+    await _db.markState(row.eventId, 'ready', now);
   }
 
   /// Reconciles a foreground acceptance that arrived after the submission
@@ -214,12 +277,15 @@ class OutboxSender {
   Future<void> dispose() async {
     _disposed = true;
     await _sub?.cancel();
+    _expirySweepTimer?.cancel();
+    _expirySweepTimer = null;
     for (final timer in _retryTimers.values) {
       timer.cancel();
     }
     _retryTimers.clear();
     _retryAfterMs.clear();
     _attempts.clear();
+    _ackTimeoutAttempts.clear();
     _draining.clear();
   }
 }

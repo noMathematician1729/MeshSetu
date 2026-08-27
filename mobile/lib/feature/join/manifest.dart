@@ -14,11 +14,15 @@ final class EventManifest {
     required this.validUntilMs,
     required this.rooms,
     required this.gatewayHint,
+    this.authorityKeyId = '',
+    this.authorityPublicKeyJwk,
   });
 
   final String siteId, siteName, meshCode, gatewayHint;
   final int validFromMs, validUntilMs;
   final List<RoomManifest> rooms;
+  final String authorityKeyId;
+  final Map<String, String>? authorityPublicKeyJwk;
 }
 
 final class RoomManifest {
@@ -86,6 +90,8 @@ abstract final class EventManifestCodec {
         validFromMs: map['validFromMs'] as int,
         validUntilMs: map['validUntilMs'] as int,
         gatewayHint: map['gatewayHint'] as String? ?? '',
+        authorityKeyId: map['authorityKeyId'] as String? ?? '',
+        authorityPublicKeyJwk: _readPublicKeyJwk(map['authorityPublicKeyJwk']),
         rooms: [
           for (final r in map['rooms'] as List<Object?>)
             RoomManifest(
@@ -106,6 +112,19 @@ abstract final class EventManifestCodec {
     }
   }
 
+  static Map<String, String>? _readPublicKeyJwk(Object? value) {
+    if (value == null) return null;
+    if (value is! Map) throw const FormatException('invalid authority key');
+    final result = <String, String>{};
+    for (final entry in value.entries) {
+      if (entry.key is! String || entry.value is! String) {
+        throw const FormatException('invalid authority key');
+      }
+      result[entry.key as String] = entry.value as String;
+    }
+    return result;
+  }
+
   static String _bodyJson(EventManifest m, {String? roomId}) => jsonEncode({
     'siteId': m.siteId,
     'siteName': m.siteName,
@@ -113,6 +132,8 @@ abstract final class EventManifestCodec {
     'validFromMs': m.validFromMs,
     'validUntilMs': m.validUntilMs,
     'gatewayHint': m.gatewayHint,
+    'authorityKeyId': m.authorityKeyId,
+    'authorityPublicKeyJwk': m.authorityPublicKeyJwk,
     if (roomId != null) 'roomId': roomId,
     'rooms': [
       for (final r in m.rooms)

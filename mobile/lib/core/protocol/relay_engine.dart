@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -47,6 +48,16 @@ class RelayResult {
   final List<RelayMetric> metrics;
 }
 
+typedef ValidSosListener =
+    FutureOr<void> Function(MeshEnvelope envelope, String peerId);
+
+typedef ResponderUpdateListener =
+    FutureOr<void> Function(
+      MeshEnvelope envelope,
+      String peerId,
+      Uint8List encryptedBytes,
+    );
+
 typedef PersistListener =
     void Function(
       MeshEnvelope envelope,
@@ -72,6 +83,7 @@ class MeshRelayEngine {
     OutboundScheduler? scheduler,
     RecentObjectCache? dedupe,
     PersistListener? onPersist,
+    this.onValidSos,
   }) : scheduler = scheduler ?? OutboundScheduler(),
        dedupe = dedupe ?? RecentObjectCache(),
        _onPersist = onPersist ?? ((_, __, ___) {}) {
@@ -89,6 +101,7 @@ class MeshRelayEngine {
   final OutboundScheduler scheduler;
   final RecentObjectCache dedupe;
   final PersistListener _onPersist;
+  final ValidSosListener? onValidSos;
 
   final Map<(String, int), ReassemblyBuffer> _partial = {};
   final Map<(String, int), int> _partialCreatedAt = {};
@@ -98,8 +111,16 @@ class MeshRelayEngine {
   final Set<int> _acknowledged = {};
   final List<RelayMetric> _metrics = [];
   final List<PersistListener> _listeners = [];
+  final List<ValidSosListener> _validSosListeners = [];
+  final List<ResponderUpdateListener> _responderListeners = [];
 
   void addPersistListener(PersistListener listener) => _listeners.add(listener);
+
+  void addResponderUpdateListener(ResponderUpdateListener listener) =>
+      _responderListeners.add(listener);
+
+  void addValidSosListener(ValidSosListener listener) =>
+      _validSosListeners.add(listener);
 
   Future<RelayResult> receive(String peerId, Uint8List encodedFrame) async {
     _cleanupPartial(clockMs());
@@ -266,6 +287,26 @@ class MeshRelayEngine {
       );
       return RelayResult(const [], _drain());
     }
+    if (envelope.payloadType == PayloadType.structuredSos) {
+      final observers = <ValidSosListener>[
+        if (onValidSos != null) onValidSos!,
+        ..._validSosListeners,
+      ];
+      for (final observer in observers) {
+        try {
+          await observer(envelope, peerId);
+        } catch (error) {
+          _metrics.add(
+            RelayMetric(
+              'reverse_route_observation_failed',
+              objectId: envelope.objectId,
+              peerId: peerId,
+              detail: '$error',
+            ),
+          );
+        }
+      }
+    }
     if (store.contains(envelope.objectId) ||
         !dedupe.markIfNew(envelope.objectId, envelope.expiresAtMs, now)) {
       _metrics.add(
@@ -313,6 +354,23 @@ class MeshRelayEngine {
         value: (now - envelope.createdAtMs).clamp(0, 0x7FFFFFFF),
       ),
     );
+    if (envelope.payloadType == PayloadType.responderUpdate) {
+      for (final listener in _responderListeners) {
+        try {
+          await listener(envelope, peerId, encrypted.bytes);
+        } catch (error) {
+          _metrics.add(
+            RelayMetric(
+              'response_router_failed',
+              objectId: envelope.objectId,
+              peerId: peerId,
+              detail: '$error',
+            ),
+          );
+        }
+      }
+      return RelayResult([_ack(frame.objectId, frame.priority)], _drain());
+    }
     if (envelope.hopCount < envelope.hopLimit) {
       final relayed = await crypto.encrypt(
         envelope.copyWith(hopCount: envelope.hopCount + 1),

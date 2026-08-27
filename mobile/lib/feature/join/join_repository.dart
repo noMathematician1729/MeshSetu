@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:drift/drift.dart' show Value;
 
 import '../../core/data/database.dart';
+import '../../core/security/development_authority_trust.dart';
 import 'manifest.dart';
 
 /// Bible §9: resolves a typed Mesh Code or scanned QR payload to a validated
@@ -12,6 +13,12 @@ class JoinRepository {
   JoinRepository(this._db);
 
   final MeshDatabase _db;
+
+  /// Locally issued events never lapse mid-use: [activeManifest] slides this
+  /// window forward on every read instead of letting a 24h TTL from the
+  /// original demo build silently strand the organizer/participants outside
+  /// authority trust (Bible return-channel §, field regression 2026-08-26).
+  static const Duration localEventValidity = Duration(days: 30);
 
   /// Demo manifests bundled/preloaded on the app, selected by typed code
   /// (Bible §9.1: "typed code selects a manifest that was bundled/preloaded
@@ -25,6 +32,8 @@ class JoinRepository {
       validFromMs: 0,
       validUntilMs: DateTime.now().millisecondsSinceEpoch + 86400000 * 365,
       gatewayHint: '',
+      authorityKeyId: DevelopmentAuthorityTrust.keyId,
+      authorityPublicKeyJwk: DevelopmentAuthorityTrust.publicKeyJwk,
       rooms: const [
         RoomManifest(
           roomId: 'public',
@@ -72,8 +81,10 @@ class JoinRepository {
       siteName: name,
       meshCode: 'LOCAL-${suffix.toUpperCase()}',
       validFromMs: now,
-      validUntilMs: now + const Duration(days: 1).inMilliseconds,
+      validUntilMs: now + localEventValidity.inMilliseconds,
       gatewayHint: '',
+      authorityKeyId: DevelopmentAuthorityTrust.keyId,
+      authorityPublicKeyJwk: DevelopmentAuthorityTrust.publicKeyJwk,
       rooms: [
         RoomManifest(
           roomId: 'public',
@@ -123,6 +134,14 @@ class JoinRepository {
             siteName: manifest.siteName,
             meshCode: manifest.meshCode,
             gatewayHint: Value(manifest.gatewayHint),
+            authorityKeyId: Value(
+              manifest.authorityKeyId.isEmpty ? null : manifest.authorityKeyId,
+            ),
+            authorityPublicKeyJwk: Value(
+              manifest.authorityPublicKeyJwk == null
+                  ? null
+                  : jsonEncode(manifest.authorityPublicKeyJwk),
+            ),
             validFromMs: manifest.validFromMs,
             validUntilMs: manifest.validUntilMs,
             roomsJson: jsonEncode([
@@ -157,6 +176,8 @@ class JoinRepository {
       validFromMs: current.validFromMs,
       validUntilMs: current.validUntilMs,
       gatewayHint: current.gatewayHint,
+      authorityKeyId: current.authorityKeyId,
+      authorityPublicKeyJwk: current.authorityPublicKeyJwk,
       rooms: [...current.rooms, room],
     );
     await activateManifest(updated);
@@ -164,10 +185,37 @@ class JoinRepository {
   }
 
   Future<EventManifest?> activeManifest() async {
-    final row = await _db.currentSite();
+    var row = await _db.currentSite();
     if (row == null) return null;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now < row.validFromMs || now > row.validUntilMs) return null;
+    final isLocal = _isLocallyIssuedManifest(row);
+    final needsTrustBackfill = _isLegacyLocalDevelopmentManifest(row);
+    final needsRenewal = isLocal && now > row.validUntilMs;
+    if (needsTrustBackfill || needsRenewal) {
+      await (_db.update(
+        _db.siteManifests,
+      )..where((table) => table.siteId.equals(row!.siteId))).write(
+        SiteManifestsCompanion(
+          authorityKeyId: needsTrustBackfill
+              ? const Value(DevelopmentAuthorityTrust.keyId)
+              : const Value.absent(),
+          authorityPublicKeyJwk: needsTrustBackfill
+              ? Value(jsonEncode(DevelopmentAuthorityTrust.publicKeyJwk))
+              : const Value.absent(),
+          // A locally issued event must not lapse mid-use: extend the
+          // window forward from now rather than letting a stale 24h TTL
+          // silently strand authority trust for an event still in use.
+          validUntilMs: needsRenewal
+              ? Value(now + localEventValidity.inMilliseconds)
+              : const Value.absent(),
+        ),
+      );
+      row = await _db.currentSite();
+      if (row == null) return null;
+    }
+    if (!isLocal && (now < row.validFromMs || now > row.validUntilMs)) {
+      return null;
+    }
     final roomsRaw = jsonDecode(row.roomsJson) as List<Object?>;
     return EventManifest(
       siteId: row.siteId,
@@ -176,6 +224,12 @@ class JoinRepository {
       validFromMs: row.validFromMs,
       validUntilMs: row.validUntilMs,
       gatewayHint: row.gatewayHint ?? '',
+      authorityKeyId: row.authorityKeyId ?? '',
+      authorityPublicKeyJwk: row.authorityPublicKeyJwk == null
+          ? null
+          : Map<String, String>.from(
+              jsonDecode(row.authorityPublicKeyJwk!) as Map,
+            ),
       rooms: [
         for (final r in roomsRaw)
           RoomManifest(
@@ -187,4 +241,16 @@ class JoinRepository {
       ],
     );
   }
+
+  /// Locally issued events (organizer-created, `event-…`/`LOCAL-…`) are the
+  /// only namespace this device controls end to end. Externally issued
+  /// manifests (bundled demo codes, another organizer's QR) keep strict
+  /// expiry: that boundary is a security property, not a usability bug.
+  bool _isLocallyIssuedManifest(SiteManifest row) =>
+      row.siteId.startsWith('event-') && row.meshCode.startsWith('LOCAL-');
+
+  bool _isLegacyLocalDevelopmentManifest(SiteManifest row) =>
+      _isLocallyIssuedManifest(row) &&
+      (row.authorityKeyId == null || row.authorityKeyId!.isEmpty) &&
+      row.authorityPublicKeyJwk == null;
 }
