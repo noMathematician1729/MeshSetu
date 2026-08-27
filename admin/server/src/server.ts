@@ -89,34 +89,6 @@ const emitRoomMembers = (key: string) => {
       socket.send(message);
   }
 };
-const roomJoinSchema = z.object({
-  type: z.literal("join-room"),
-  siteId: z.string().min(1).max(100),
-  roomId: z.string().min(1).max(100),
-  memberId: z.string().min(1).max(200),
-  displayName: z.string().min(1).max(100),
-  gatewayKey: z.string().min(1),
-});
-const roomMessageSchema = z.object({
-  type: z.literal("room-message"),
-  messageId: z.string().min(1).max(200),
-  text: z.string().trim().min(1).max(2000),
-  sentAtMs: z.number().int().positive(),
-});
-function bearer(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction,
-) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token) return res.status(401).json({ error: "authentication required" });
-  try {
-    (req as any).operator = jwt.verify(token, jwtSecret());
-    next();
-  } catch {
-    res.status(401).json({ error: "invalid token" });
-  }
-}
 const roomJoinSchema = z.object({ type: z.literal('join-room'), siteId: z.string().min(1).max(100), roomId: z.string().min(1).max(100), memberId: z.string().min(1).max(200), displayName: z.string().min(1).max(100), gatewayKey: z.string().min(1) })
 const roomMessageSchema = z.object({ type: z.literal('room-message'), messageId: z.string().min(1).max(200), text: z.string().trim().min(1).max(2000), sentAtMs: z.number().int().positive() })
 // A push-to-talk voice note relayed between room members. `audio` is base64
