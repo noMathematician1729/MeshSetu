@@ -1,4 +1,4 @@
-# MeshSetu - Team -1x Devs.
+.# MeshSetu - Team -1x Devs.
 
 Android-first, offline emergency communication over a BLE store-and-forward overlay.
 
