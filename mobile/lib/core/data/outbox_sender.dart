@@ -25,9 +25,12 @@ class OutboxSender {
     required this.localEphemeralId,
     this.maxAttempts = 5,
     this.retryBaseDelay = const Duration(seconds: 1),
+    this.expirySweepInterval = const Duration(seconds: 10),
     this.onDeliveryFailure,
+    this.onDiagnostic,
   }) : assert(maxAttempts > 0),
-       assert(retryBaseDelay > Duration.zero);
+       assert(retryBaseDelay > Duration.zero),
+       assert(expirySweepInterval > Duration.zero);
 
   final MeshDatabase _db;
   final Future<void> Function(MeshEnvelope envelope) _send;
@@ -35,7 +38,21 @@ class OutboxSender {
   final int localEphemeralId;
   final int maxAttempts;
   final Duration retryBaseDelay;
+
+  /// How often relaying rows past their expiry are swept to 'expired'. This
+  /// is the backstop for a peer that never sends a custody ack and never
+  /// times out at the relay-engine level either (e.g. the BLE write never
+  /// completed at all) — without it, such a row has no path off 'relaying'
+  /// and renders as an ungreen "Relaying now" card forever.
+  final Duration expirySweepInterval;
   final void Function(OutboxEvent row, Object error)? onDeliveryFailure;
+
+  /// Fired for conditions worth surfacing to logs/telemetry that are not a
+  /// delivery failure of a specific row — e.g. an ack/expiry metric whose
+  /// objectId does not match any row in this instance's own [siteId], which
+  /// would otherwise be silently dropped by the site-scoped update in
+  /// [_markByObjectId] and look identical to "no such object".
+  final void Function(String kind, {String? detail})? onDiagnostic;
 
   StreamSubscription<List<OutboxEvent>>? _sub;
   final Set<String> _draining = {};
@@ -43,10 +60,16 @@ class OutboxSender {
   final Map<String, int> _retryAfterMs = {};
   final Map<String, int> _attempts = {};
   bool _disposed = false;
+  Timer? _expirySweepTimer;
 
   void start() {
     _disposed = false;
     unawaited(_recoverAndListen());
+    _expirySweepTimer?.cancel();
+    _expirySweepTimer = Timer.periodic(
+      expirySweepInterval,
+      (_) => unawaited(_sweepExpiredRelaying()),
+    );
   }
 
   Future<void> _recoverAndListen() async {
@@ -69,16 +92,90 @@ class OutboxSender {
     });
   }
 
+  /// Scoped deliberately to this site's 'relaying' rows only — not the
+  /// unscoped [MeshDatabase.expireOverdue], which would also touch
+  /// unfinalized 'created' drafts and rows belonging to other sites.
+  Future<void> _sweepExpiredRelaying() async {
+    if (_disposed) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rows =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) =>
+                  t.siteId.equals(siteId) &
+                  t.state.equals('relaying') &
+                  t.expiresAtMs.isSmallerOrEqualValue(now),
+            ))
+            .get();
+    for (final row in rows) {
+      _ackTimeoutAttempts.remove(row.objectId);
+      await _db.markState(row.eventId, 'expired', now);
+    }
+  }
+
+  /// Bounded ack-timeout retry counter, keyed by durable objectId rather
+  /// than eventId: the relay engine's own timeout is a transport-level
+  /// signal per object, independent of the send-callback attempt counter
+  /// in [_attempts].
+  final Map<int, int> _ackTimeoutAttempts = {};
+
+  /// Maximum times a relaying row is returned to READY after its custody
+  /// ack never arrived before this device gives up and marks it FAILED.
+  /// Without this bound (and without [ack_timeout] being handled at all),
+  /// a row with no reachable peer stays on 'relaying' forever — rendered
+  /// as an ungreen "Relaying now" card that never changes.
+  static const int maxAckTimeoutAttempts = 5;
+
   Future<void> onMetrics(List<RelayMetric> metrics) async {
     for (final m in metrics) {
       final objectId = m.objectId;
       if (objectId == null) continue;
       if (m.kind == 'ack') {
+        _ackTimeoutAttempts.remove(objectId);
         await _markByObjectId(objectId, 'acked');
       } else if (m.kind == 'expired') {
+        _ackTimeoutAttempts.remove(objectId);
         await _markByObjectId(objectId, 'expired');
+      } else if (m.kind == 'ack_timeout') {
+        await _handleAckTimeout(objectId);
       }
     }
+  }
+
+  /// The relay engine already retries the BLE send internally on its own
+  /// timeout; this makes that retry visible and bounded at the outbox level
+  /// so a peer that never acknowledges custody cannot leave the row stuck
+  /// on 'relaying' indefinitely. [expireOverdue] remains the backstop for
+  /// rows whose response window has passed entirely.
+  Future<void> _handleAckTimeout(int objectId) async {
+    final row =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) =>
+                  t.siteId.equals(siteId) &
+                  t.objectId.equals(objectId) &
+                  t.state.equals('relaying'),
+            ))
+            .getSingleOrNull();
+    if (row == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (row.expiresAtMs <= now) {
+      _ackTimeoutAttempts.remove(objectId);
+      await _db.markState(row.eventId, 'expired', now);
+      return;
+    }
+    final attempt = (_ackTimeoutAttempts[objectId] ?? 0) + 1;
+    if (attempt >= maxAckTimeoutAttempts) {
+      _ackTimeoutAttempts.remove(objectId);
+      await _db.markState(row.eventId, 'failed', now);
+      onDeliveryFailure?.call(
+        row,
+        StateError('no custody acknowledgement after $attempt attempts'),
+      );
+      return;
+    }
+    _ackTimeoutAttempts[objectId] = attempt;
+    // Returning to 'ready' lets watchReady() redrain it through the normal
+    // path, which re-checks expiresAtMs before sending again.
+    await _db.markState(row.eventId, 'ready', now);
   }
 
   /// Reconciles a foreground acceptance that arrived after the submission
@@ -110,15 +207,38 @@ class OutboxSender {
 
   Future<void> _markByObjectId(int objectId, String state) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    await (_db.update(_db.outboxEvents)..where(
-          (t) =>
-              t.siteId.equals(siteId) &
-              t.objectId.equals(objectId) &
-              t.state.equals('relaying'),
-        ))
-        .write(
-          OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(now)),
-        );
+    final updated =
+        await (_db.update(_db.outboxEvents)..where(
+              (t) =>
+                  t.siteId.equals(siteId) &
+                  t.objectId.equals(objectId) &
+                  t.state.equals('relaying'),
+            ))
+            .write(
+              OutboxEventsCompanion(
+                state: Value(state),
+                updatedAtMs: Value(now),
+              ),
+            );
+    if (updated > 0) return;
+    // Nothing matched this site's own relaying row for that objectId. This
+    // metric may simply be for a different local row (already acked,
+    // already expired, or genuinely unknown) — but it may also be a
+    // namespace mismatch: an ack/expiry decoded for the right objectId but
+    // filed under a different siteId, which would otherwise be swallowed
+    // here identically to "no such object" and never surfaced anywhere.
+    final mismatched =
+        await (_db.select(_db.outboxEvents)..where(
+              (t) =>
+                  t.objectId.equals(objectId) & t.siteId.equals(siteId).not(),
+            ))
+            .getSingleOrNull();
+    if (mismatched != null) {
+      onDiagnostic?.call(
+        'ack_site_mismatch',
+        detail: 'objectId matched a row under a different active site',
+      );
+    }
   }
 
   Future<void> _drainOnce(OutboxEvent row) async {
@@ -214,12 +334,15 @@ class OutboxSender {
   Future<void> dispose() async {
     _disposed = true;
     await _sub?.cancel();
+    _expirySweepTimer?.cancel();
+    _expirySweepTimer = null;
     for (final timer in _retryTimers.values) {
       timer.cancel();
     }
     _retryTimers.clear();
     _retryAfterMs.clear();
     _attempts.clear();
+    _ackTimeoutAttempts.clear();
     _draining.clear();
   }
 }
