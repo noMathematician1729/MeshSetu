@@ -7,6 +7,11 @@ const cache = new Map<string, { expiresAt: number; value: NearbyAuthority[] }>()
 const amenityFor: Record<EmergencyType, string> = {
   fire: 'fire_station', crime: 'police', kidnap: 'police', medical: 'hospital', natural_disaster: 'police', general: 'police',
 }
+const directoryEndpoints = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+]
 const distanceMetres = (latitudeA: number, longitudeA: number, latitudeB: number, longitudeB: number) => {
   const radians = (value: number) => value * Math.PI / 180
   const latitudeDistance = radians(latitudeB - latitudeA)
@@ -21,9 +26,25 @@ export async function findNearbyAuthorities(latitude: number, longitude: number,
   if (cached && cached.expiresAt > Date.now()) return cached.value
   const amenity = amenityFor[type]
   const query = `[out:json][timeout:12];nwr(around:25000,${latitude},${longitude})["amenity"="${amenity}"];out center tags;`
-  const response = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', headers: { 'user-agent': 'MeshSetu/1.0 (emergency directory)' }, body: query, signal: AbortSignal.timeout(15_000) })
-  if (!response.ok) throw new Error('local authority directory unavailable')
-  const payload = await response.json() as { elements?: OverpassElement[] }
+  let payload: { elements?: OverpassElement[] } | undefined
+  for (const endpoint of directoryEndpoints) {
+    try {
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'user-agent': 'MeshSetu/1.0 (emergency directory)' }, body: query, signal: AbortSignal.timeout(15_000) })
+      if (response.ok) {
+        payload = await response.json() as { elements?: OverpassElement[] }
+        break
+      }
+    } catch {
+      // Try the next independent Overpass mirror.
+    }
+  }
+  if (!payload) {
+    // India’s ERSS dispatch number is the safe nationwide fallback while the
+    // live local directory is unavailable. It accepts police, fire, medical,
+    // and disaster emergencies and prevents a directory outage from hiding a
+    // usable emergency contact.
+    return [{ name: 'India Emergency Response Support System', phone: '112', distance_m: 0, latitude, longitude, address: 'Nationwide emergency dispatch fallback' }]
+  }
   const authorities = (payload.elements ?? []).flatMap(element => {
     const tags = element.tags ?? {}
     const phone = tags['contact:phone'] || tags.phone || tags['contact:mobile'] || tags.mobile
