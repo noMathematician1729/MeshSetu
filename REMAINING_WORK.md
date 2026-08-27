@@ -29,7 +29,7 @@ Verification baseline at the time of writing:
 | §12 Offline STT | `feature/stt/sherpa_onnx_stt_engine.dart` | sherpa-onnx zipformer (int8 encoder), behind `OfflineSttEngine`. Fake engine for tests. |
 | §13 Triage (rules) | `feature/triage/triage_engine.dart`, `admin/server/src/triage.ts` | Deterministic safety rules; escalate-only, cannot suppress a manual SOS. |
 | §14 Beacon → zone | `core/ble/sos_advertisement.dart`, `app/mesh_event_controller.dart` | Beacon observation → logical zone with explicit uncertainty. |
-| §15 Gateway + control room | `feature/gateway/`, `admin/server/`, `admin/client/` | Node/TS API + React dashboard (replaces the spec's FastAPI sketch). |
+| §15 Gateway + control room | `feature/gateway/`, `admin/server/`, `admin/client/` | Node/TS API + React dashboard; signed responder updates now have durable `MESH_QUEUED` → targeted `FORWARDING` → sender receipt progress and explicit `FAILED`/`EXPIRED` outcomes. |
 | §17 Persistence + foreground service | `core/data/database.dart`, `core/data/outbox_sender.dart`, `app/event_mode_*` | Drift outbox/inbox state machine; connected-device foreground service. |
 | §17.3 Metrics | `core/protocol/protocol_metrics.dart` | Privacy-safe newline-delimited metrics. |
 | Compact CEAL SOS + identity resolution | `core/ble/sos_advertisement.dart`, `app/sos_alert_notifications.dart` | v1 (14B) / v2 (20B with pseudonymous UID) adverts; online receivers resolve expanded details, offline receivers keep a readable compact packet. |
@@ -47,7 +47,6 @@ Verification baseline at the time of writing:
 | **Zone density estimate** | §14.3 | No `estimateDensity` anywhere in the codebase. |
 | **Zone precursor score** | §14.4 | No `precursorScore` / `ZoneSignals`. The dashboard has no precursor panel, so the "advisory, not auto-dispatch" separation the spec requires is undemonstrated. |
 | **Triage ML classifier** | §13.4–13.6 | `TriageClassifier` is an interface with no implementation; no `.tflite`/ONNX triage model, no `ml/triage-training/`. Triage is rules-only today (honest, but the spec's optional classifier is absent). |
-| **Responder update back into mesh** | §15.4 | Operator ACK exists; signed authority command flowing back into the mesh as a high-priority control event is not implemented. |
 | **Log parser / packet simulator tooling** | §4.1 `tools/` | Metrics are emitted but there is no `log_parser.py` / `packet_simulator.py`. Judged metrics (median/P95 latency, delivery rate) must currently be computed manually. |
 | **STT benchmark harness + report** | §12.5–12.6, §18.4 | No `SttBenchmarkCase` harness, no recorded model latency/keyword-recall table on real devices. |
 | **Fourth product feature** | §1.2 | Intentionally unspecified. Extension point only — do not invent. |

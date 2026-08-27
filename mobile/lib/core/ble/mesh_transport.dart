@@ -8,6 +8,7 @@ import '../protocol/protocol_metrics.dart';
 import 'async_lock.dart';
 import 'gatt_peer_session.dart';
 import 'gatt_server.dart';
+import 'peer_directory.dart';
 
 class SendTicket {
   const SendTicket(this.objectId);
@@ -114,8 +115,10 @@ class MeshTransportCoordinator implements MeshTransport {
     required this.relay,
     this.localHello,
     this.frameInterceptor,
+    PeerDirectory? peerDirectory,
     MetricsListener? onMetrics,
-  }) : _onMetrics = onMetrics ?? ((_) {}) {
+  }) : _peerDirectory = peerDirectory ?? PeerDirectory(),
+       _onMetrics = onMetrics ?? ((_) {}) {
     _peersController = StreamController<List<PeerState>>.broadcast();
     relay.addPersistListener((envelope, peerId, encryptedBytes) {
       _receivedController.add(
@@ -136,6 +139,8 @@ class MeshTransportCoordinator implements MeshTransport {
   final MeshRelayEngine relay;
   final Hello? localHello;
   LossyFrameInterceptor? frameInterceptor;
+  final PeerDirectory _peerDirectory;
+  PeerDirectory get peerDirectory => _peerDirectory;
   final MetricsListener _onMetrics;
 
   final StreamController<ReceivedObject> _receivedController =
@@ -434,6 +439,107 @@ class MeshTransportCoordinator implements MeshTransport {
     });
   }
 
+  /// Sends one already-encrypted object only to the session currently bound to
+  /// [ephemeralNodeId]. This does not enqueue or remove scheduler ownership;
+  /// callers retain durable response state and decide whether to retry.
+  Future<bool> sendToPeer(int ephemeralNodeId, EncryptedObject object) =>
+      _relayLock.synchronized(() async {
+        final entry = _peerDirectory.entryFor(ephemeralNodeId);
+        if (entry == null) {
+          _onMetrics([
+            RelayMetric(
+              'target_peer_miss',
+              objectId: object.objectId,
+              value: ephemeralNodeId,
+            ),
+          ]);
+          return false;
+        }
+        final link = _sessions[entry.peerId];
+        if (link == null) {
+          _onMetrics([
+            RelayMetric(
+              'target_peer_stale',
+              objectId: object.objectId,
+              value: ephemeralNodeId,
+            ),
+          ]);
+          return false;
+        }
+        return _sendObjectToLink(entry.peerId, link, object, mtu: link.mtu);
+      });
+
+  Future<bool> _sendObjectToLink(
+    String peerId,
+    PeerLink link,
+    EncryptedObject object, {
+    required int mtu,
+  }) async {
+    try {
+      final frames = fragment(
+        objectId: object.objectId,
+        priority: object.trafficClass.rank,
+        encrypted: object.bytes,
+        mtu: mtu,
+      );
+      for (final frame in frames) {
+        final encoded = FrameCodec.encode(frame);
+        final intercepted = frameInterceptor == null
+            ? encoded
+            : frameInterceptor!.apply(encoded);
+        if (intercepted == null) {
+          _onMetrics([
+            RelayMetric(
+              'target_send_intercepted',
+              objectId: object.objectId,
+              peerId: peerId,
+            ),
+          ]);
+          return false;
+        }
+        final ok = await link.send(intercepted, withResponse: true);
+        _onMetrics([
+          RelayMetric(
+            'frame_write_accepted_locally',
+            objectId: object.objectId,
+            peerId: peerId,
+            value: intercepted.length,
+            detail: ok ? 'accepted' : 'rejected',
+          ),
+        ]);
+        if (!ok) return false;
+      }
+      _onMetrics([
+        RelayMetric(
+          'target_send_succeeded',
+          objectId: object.objectId,
+          peerId: peerId,
+          value: frames.length,
+        ),
+      ]);
+      return true;
+    } on ArgumentError {
+      _onMetrics([
+        RelayMetric(
+          'target_send_mtu_rejected',
+          objectId: object.objectId,
+          peerId: peerId,
+        ),
+      ]);
+      return false;
+    } catch (error) {
+      _onMetrics([
+        RelayMetric(
+          'target_send_failed',
+          objectId: object.objectId,
+          peerId: peerId,
+          detail: '$error',
+        ),
+      ]);
+      return false;
+    }
+  }
+
   /// Produces the authenticated packet representation used by an online
   /// gateway. The mesh send path encrypts independently, so this method never
   /// changes scheduler ownership or peer delivery.
@@ -627,6 +733,7 @@ class MeshTransportCoordinator implements MeshTransport {
     _serverPeersStarting.clear();
     _lastInboundPeerByObject.clear();
     _helloVerifiedPeers.clear();
+    _peerDirectory.clear();
     await server.stop();
     _peers = [];
     _emitPeers();
@@ -642,6 +749,7 @@ class MeshTransportCoordinator implements MeshTransport {
     final current = _sessions[peerId];
     if (current == null || (expected != null && current != expected)) return;
     _helloVerifiedPeers.remove(peerId);
+    _peerDirectory.removePeer(peerId);
     final peerCountBefore = _sessions.length;
     _sessions.remove(peerId);
     final subs = _sessionSubscriptions.remove(peerId);
@@ -740,6 +848,12 @@ class MeshTransportCoordinator implements MeshTransport {
       rssi: peer.rssi,
       queuedObjects: relay.scheduler.size(),
       lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _peerDirectory.markSeen(
+      peerId,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+      mtu: peer.mtu,
+      rssi: peer.rssi,
     );
     _emitPeers();
   }
@@ -848,6 +962,19 @@ class MeshTransportCoordinator implements MeshTransport {
     // still enforced at the envelope layer, where the AEAD site key makes a
     // wrong-site payload fail authentication instead of failing silently.
     _helloVerifiedPeers.add(peerId);
+    final session = _sessions[peerId];
+    final peerState = _peers.cast<PeerState?>().firstWhere(
+      (peer) => peer?.peerId == peerId,
+      orElse: () => null,
+    );
+    _peerDirectory.register(
+      ephemeralNodeId: remote.ephemeralNodeId,
+      peerId: peerId,
+      mtu: session?.mtu ?? 23,
+      lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+      siteFingerprint: remote.siteFingerprint,
+      rssi: peerState?.rssi,
+    );
     if (!sameSite) {
       _onMetrics([RelayMetric('peer_unverified_site', peerId: peerId)]);
     }

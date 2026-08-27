@@ -6,6 +6,48 @@ import '../../core/model/model.dart';
 import '../sos/sos_payload.dart';
 import '../voice/voice_repository.dart';
 
+final class GatewayResponseCommand {
+  const GatewayResponseCommand({
+    required this.responseId,
+    required this.replyToEventId,
+    required this.siteId,
+    required this.destinationEphemeralId,
+    required this.signedPayload,
+    required this.createdAtMs,
+    required this.expiresAtMs,
+  });
+
+  final String responseId;
+  final String replyToEventId;
+  final String siteId;
+  final int destinationEphemeralId;
+  final List<int> signedPayload;
+  final int createdAtMs;
+  final int expiresAtMs;
+
+  factory GatewayResponseCommand.fromJson(Map<String, Object?> json) {
+    int integer(String key) {
+      final value = json[key];
+      if (value is num) return value.toInt();
+      return int.parse('$value');
+    }
+
+    final encoded = json['signed_payload_b64'];
+    if (encoded is! String || encoded.isEmpty) {
+      throw const FormatException('gateway command has no signed payload');
+    }
+    return GatewayResponseCommand(
+      responseId: json['response_id'] as String,
+      replyToEventId: json['event_id'] as String,
+      siteId: json['site_id'] as String,
+      destinationEphemeralId: integer('destination_ephemeral_id'),
+      signedPayload: base64Decode(encoded),
+      createdAtMs: integer('created_at_ms'),
+      expiresAtMs: integer('expires_at_ms'),
+    );
+  }
+}
+
 /// Bible §15.1/§3.4: the gateway phone receives mesh objects exactly like
 /// any other peer (Dev A's `MeshTransportCoordinator`); this bridge only
 /// pushes the original encrypted/reassembled mesh object to the configured
@@ -282,6 +324,139 @@ class GatewayBridge {
     }
   }
 
+  Future<({String cursor, List<GatewayResponseCommand> commands})>
+  pollAuthorityCommands({
+    required String gatewaySessionId,
+    required String cursor,
+    int waitMs = 15000,
+    int limit = 20,
+  }) async {
+    final query = Uri(
+      queryParameters: {
+        'cursor': cursor,
+        'wait_ms': '$waitMs',
+        'limit': '$limit',
+      },
+    ).query;
+    final response = await _client
+        .get(
+          baseUrl.resolve(
+            '/v1/gateways/${Uri.encodeComponent(gatewaySessionId)}/commands?$query',
+          ),
+          headers: {'x-meshsetu-gateway-key': demoKey},
+        )
+        .timeout(requestTimeout);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('gateway command HTTP ${response.statusCode}');
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw const FormatException('invalid gateway command response');
+    }
+    final rawCommands = decoded['commands'];
+    if (rawCommands is! List) {
+      throw const FormatException('gateway command list is missing');
+    }
+    return (
+      cursor: '${decoded['cursor'] ?? cursor}',
+      commands: [
+        for (final raw in rawCommands)
+          if (raw is Map)
+            GatewayResponseCommand.fromJson(raw.cast<String, Object?>()),
+      ],
+    );
+  }
+
+  /// Reports a bounded, additive lifecycle update for a signed authority
+  /// response. Gateway custody is deliberately separate from sender delivery:
+  /// SENDER_DELIVERED must carry the sender-generated receipt identity and the
+  /// existing receipt endpoint remains the only path to the final dashboard
+  /// state.
+  Future<bool> reportAuthorityResponseProgress({
+    required String responseId,
+    required String gatewaySessionId,
+    required String state,
+    String? routeMode,
+    int? returnHops,
+    int? retryCount,
+    String? error,
+    String? receiptId,
+    String? replyToEventId,
+    int? senderEphemeralId,
+  }) async {
+    final response = await _client
+        .post(
+          baseUrl.resolve(
+            '/v1/responses/${Uri.encodeComponent(responseId)}/progress',
+          ),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({
+            'state': state,
+            'gateway_session_id': gatewaySessionId,
+            if (routeMode != null) 'route_mode': routeMode,
+            if (returnHops != null) 'return_hops': returnHops,
+            if (retryCount != null) 'retry_count': retryCount,
+            if (error != null) 'error': error,
+            if (receiptId != null) 'receipt_id': receiptId,
+            if (replyToEventId != null) 'reply_to_event_id': replyToEventId,
+            if (senderEphemeralId != null)
+              'sender_ephemeral_id': senderEphemeralId.toString(),
+          }),
+        )
+        .timeout(requestTimeout);
+    return response.statusCode >= 200 && response.statusCode < 300;
+  }
+
+  Future<bool> acknowledgeAuthorityCommand({
+    required String gatewaySessionId,
+    required String responseId,
+    required int meshObjectId,
+  }) async {
+    final response = await _client
+        .post(
+          baseUrl.resolve(
+            '/v1/gateways/${Uri.encodeComponent(gatewaySessionId)}/commands/${Uri.encodeComponent(responseId)}/received',
+          ),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({'mesh_object_id': meshObjectId.toString()}),
+        )
+        .timeout(requestTimeout);
+    return response.statusCode >= 200 && response.statusCode < 300;
+  }
+
+  Future<bool> uploadResponseReceipt({
+    required String responseId,
+    required String receiptId,
+    required String replyToEventId,
+    required int senderEphemeralId,
+    required int createdAtMs,
+  }) async {
+    final response = await _client
+        .post(
+          baseUrl.resolve(
+            '/v1/responses/${Uri.encodeComponent(responseId)}/receipts',
+          ),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({
+            'receipt_id': receiptId,
+            'reply_to_event_id': replyToEventId,
+            'sender_ephemeral_id': senderEphemeralId.toString(),
+            'created_at_ms': createdAtMs,
+          }),
+        )
+        .timeout(requestTimeout);
+    return response.statusCode >= 200 && response.statusCode < 300;
+  }
+
   /// Undelivered alerts addressed to this account (emergency-contact fan-out).
   Future<List<Map<String, Object?>>> fetchNotifications(
     String recipientUid,
@@ -304,9 +479,3 @@ class GatewayBridge {
     }
   }
 }
-
-// The actual forwarding trigger lives in `app/mesh_bridge_client.dart`:
-// `MeshTransportCoordinator.incoming` only exists in the background
-// isolate, so the UI-isolate bridge client forwards `structuredSos`
-// objects using this class's `postToDashboard`/`eventJson` as they arrive
-// over the cross-isolate `mesh_received` channel.

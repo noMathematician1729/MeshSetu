@@ -10,6 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../core/data/database.dart';
 import '../core/ble/device_sms_service.dart';
+import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
@@ -67,6 +68,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   bool _sosPacketSending = false;
   SosEmergencyType _selectedEmergencyType = SosEmergencyType.general;
   String _sosDescription = '';
+  String? _authorityResponseType;
+  String? _authorityResponseMessage;
+  String? _authorityRejectionMessage;
   bool _gestureConfirmationShowing = false;
   bool _gestureServiceEnabled = false;
   StreamSubscription<SosEmergencyType>? _typedSosGestureSubscription;
@@ -124,6 +128,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
     unawaited(_refreshGestureServiceState());
+    unawaited(_restoreLatestVerifiedAuthorityResponse());
     // Retry any durable SOS rows as soon as the app opens, even if BLE/event
     // mode is unavailable on this phone.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -132,6 +137,57 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       unawaited(_restoreOrStartEventMode());
     });
   }
+
+  Future<void> _restoreLatestVerifiedAuthorityResponse() async {
+    try {
+      final manifest = await _joinRepository.activeManifest();
+      if (manifest == null) return;
+      final rows = await (_database.select(
+        _database.authorityInbox,
+      )..where((table) => table.siteId.equals(manifest.siteId))).get();
+      if (!mounted || rows.isEmpty) return;
+      rows.sort((a, b) => b.createdAtMs.compareTo(a.createdAtMs));
+      final latest = rows.first;
+      setState(() {
+        _authorityResponseType = latest.responseType;
+        _authorityResponseMessage = latest.messageText;
+      });
+    } catch (_) {
+      // The inbox is supplemental UI state; it must not block Event Mode.
+    }
+  }
+
+  /// Maps a bounded, privacy-safe rejection category from ReturnRouter or
+  /// the authority-trust resolver to plain language. Only known categories
+  /// are translated; anything else returns null so no raw internal detail
+  /// (keys, signatures, payload bytes) can ever reach a notification or the
+  /// screen.
+  String? _authorityRejectionText(String? category) => switch (category) {
+    'no_active_event' =>
+      'No active event on this phone. Rejoin or recreate the event to '
+          'receive control room responses.',
+    'manifest_missing_key' || 'manifest_key_unusable' =>
+      'This event is missing a valid control room key. Rejoin the event.',
+    'authority_trust_missing' =>
+      'No active event on this phone. Rejoin or recreate the event to '
+          'receive control room responses.',
+    'authority_trust_rejected_site' =>
+      'The response was signed for a different event than this phone\'s '
+          'active event.',
+    'authority_trust_rejected_key_id' ||
+    'authority_trust_rejected_algorithm' ||
+    'cryptographic_verification' =>
+      'The response could not be cryptographically verified.',
+    'event_or_message_guard' =>
+      'The response did not match a known SOS from this phone.',
+    'wrong_site' => 'The response was signed for a different event.',
+    'expired_or_hop_limit' ||
+    'response_ttl' ||
+    'hop_limit' => 'The response expired before it could be verified.',
+    'no_eligible_return_route' =>
+      'The response could not find a path back to this phone.',
+    _ => null,
+  };
 
   Future<void> _restoreOrStartEventMode() async {
     if (await FlutterForegroundTask.isRunningService) {
@@ -279,6 +335,54 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             MeshBridge.receivedFromJson(receivedJson.cast<Object?, Object?>()),
           );
         }
+      case 'verified_authority_response':
+        // This task event is emitted only after ReturnRouter has validated the
+        // response signature, namespace, event, expiry, and message bounds.
+        final message = data['messageText'] as String?;
+        if (message == null || message.trim().isEmpty) return;
+        setState(() {
+          _authorityResponseType = data['responseType'] as String? ?? 'update';
+          _authorityResponseMessage = message;
+          _authorityRejectionMessage = null;
+          _status =
+              'MeshSetu\nControl room accepted your SOS\n$_authorityResponseType\n$message';
+        });
+      case 'authority_response_progress':
+        final state = data['state'] as String?;
+        if (state != 'FAILED' && state != 'EXPIRED') return;
+        final reason = _authorityRejectionText(data['error'] as String?);
+        if (reason == null) return;
+        setState(() {
+          _authorityRejectionMessage = reason;
+          _status =
+              'MeshSetu\nControl room response could not be verified\n$reason';
+        });
+        unawaited(
+          SosAlertNotifications.show(
+            id: SosAlertNotifications.idForKey(
+              'authority-rejected:${data['responseId'] ?? state}',
+            ),
+            title: 'Control room response not verified',
+            body: reason,
+            payload: null,
+          ),
+        );
+      case 'authority_trust_unavailable':
+        final reason = _authorityRejectionText(data['reason'] as String?);
+        if (reason == null) return;
+        setState(() {
+          _authorityRejectionMessage = reason;
+          _status =
+              'MeshSetu\nControl room response could not be verified\n$reason';
+        });
+        unawaited(
+          SosAlertNotifications.show(
+            id: SosAlertNotifications.idForKey('authority-trust-unavailable'),
+            title: 'Control room response not verified',
+            body: reason,
+            payload: null,
+          ),
+        );
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
       case 'mesh_metric':
@@ -466,6 +570,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     );
   }
 
+  Future<String?> _siteForCompactAlert(Map data) async {
+    final advertisedFingerprint = data['siteFingerprint'] as int?;
+    if (advertisedFingerprint == null) return null;
+    final manifest = await _joinRepository.activeManifest();
+    if (manifest == null) return null;
+    final expectedFingerprint =
+        MeshGatt.siteFingerprint(
+          manifest.siteId,
+          namespace: MeshSiteConfiguration.forSite(manifest.siteId).namespace,
+        ) &
+        0xffffffff;
+    return expectedFingerprint == advertisedFingerprint
+        ? manifest.siteId
+        : null;
+  }
+
   Future<void> _showCompactSosFallback(
     Map data, {
     required String availability,
@@ -510,14 +630,33 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           ? originId.toRadixString(16).padLeft(8, '0')
           : '';
       if (reporterUid.isEmpty) return;
+      final sourceSiteId = await _siteForCompactAlert(data);
+      if (sourceSiteId == null) {
+        // A compact SOS advertises a non-reversible fingerprint. Never guess
+        // the full site ID from B's own manifest: that was the source of the
+        // demo-site response signed for Phone A's local event. The encrypted
+        // structured SOS carries the full site/event IDs and remains eligible
+        // for dashboard forwarding through MeshBridgeClient.
+        await _showCompactSosFallback(
+          data,
+          availability:
+              'Sender event cannot be identified from this compact BLE alert; awaiting its encrypted SOS details.',
+        );
+        if (mounted) {
+          setState(
+            () => _status =
+                'MeshSetu\nCompact SOS awaits verified sender event details',
+          );
+        }
+        return;
+      }
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
       // The detail request itself is the reachability check. A separate health
       // probe incorrectly marked phones with working cellular data as offline
       // when that probe timed out or the control room was waking up.
-      final site = await _joinRepository.activeManifest();
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
-        siteId: site?.siteId ?? MeshEventController.demoSiteId,
+        siteId: sourceSiteId,
         flags: data['flags'] as int? ?? MeshSosAdvertisement.alertFlag,
         originId: originId,
         sequence: sequence,
@@ -1044,14 +1183,29 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       // on _bridgeClient (which may not yet be initialized).
       final url = ref.read(gatewayUrlProvider);
       final key = ref.read(gatewayDemoKeyProvider);
+      final activeSite = await ref
+          .read(joinRepositoryProvider)
+          .activeManifest();
+      if (activeSite == null) {
+        // Never forward this identity SOS to the dashboard under a fallback
+        // demo-site namespace: the control room would create an incident
+        // whose signed response can never pass this phone's site guard. The
+        // BLE broadcast above has already gone out regardless.
+        if (mounted) {
+          setState(
+            () => _status =
+                'MeshSetu\nIdentity SOS broadcast over Bluetooth only\n'
+                'No active event on this phone — join or recreate an event '
+                'to reach the control room dashboard.',
+          );
+        }
+        return;
+      }
       if (url.isNotEmpty && key.isNotEmpty) {
         final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
         final (success, detail, _) = await bridge.forwardCealSos(
           reporterUid: profile.reporterUid,
-          siteId:
-              (await ref.read(joinRepositoryProvider).activeManifest())
-                  ?.siteId ??
-              MeshEventController.demoSiteId,
+          siteId: activeSite.siteId,
           flags: MeshSosAdvertisement.flagsFor(SosEmergencyType.general),
           originId: originId,
           latitude: location?.latitude,
@@ -1432,6 +1586,38 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
+  Future<void> _toggleEventMode() async {
+    if (_eventModeActive) {
+      // Stopping halts the active BLE relay/foreground service, so confirm
+      // first rather than silently dropping an in-progress mesh session.
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Stop event mode?'),
+          content: const Text(
+            'This stops the BLE relay service. Restarting afterward clears '
+            'any stale Bluetooth connections, which can help if a nearby '
+            'SOS is stuck relaying.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Stop'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      await _stopEventMode();
+    } else {
+      await _startEventMode();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(gatewayEnabledProvider, (_, next) {
@@ -1454,11 +1640,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       holdSeconds: ref.watch(sosTimeoutProvider).round(),
       onSos: () => unawaited(_sendSosPacket(_selectedEmergencyType)),
       onProfile: () => unawaited(_openProfile()),
+      onToggleEventMode: () => unawaited(_toggleEventMode()),
       onEmergencyType: () => unawaited(_chooseEmergencyType()),
       onVoice: () => unawaited(_runSttSmokeTest()),
       onDescribe: () => unawaited(_describeSos()),
       onCreateRoom: () => unawaited(_createEventAndRoom()),
       onJoinRoom: () => unawaited(_joinRoomScanQr()),
+      authorityResponseType: _authorityResponseType,
+      authorityResponseMessage: _authorityResponseMessage,
+      authorityRejectionMessage: _authorityRejectionMessage,
     );
   }
 }

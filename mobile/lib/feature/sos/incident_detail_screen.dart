@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../app/providers.dart';
 import '../../core/data/database.dart';
@@ -91,14 +93,84 @@ class IncidentDetailScreen extends ConsumerWidget {
                         icon: Icons.contact_phone_outlined,
                       ),
                       const Divider(height: MeshSpace.sm),
-                      MeshDataRow(
-                        label: 'Location',
-                        value: sos.latitude == null || sos.longitude == null
-                            ? 'Unavailable'
-                            : '${sos.latitude!.toStringAsFixed(5)}, ${sos.longitude!.toStringAsFixed(5)}'
-                                  '${sos.accuracyM == null ? '' : ' · ±${sos.accuracyM!.round()} m'}',
-                        icon: Icons.location_on_outlined,
-                      ),
+                      if (sos.latitude != null && sos.longitude != null) ...[
+                        const SizedBox(height: MeshSpace.xs),
+                        Row(
+                          children: [
+                            const Icon(Icons.location_on_outlined, size: 18),
+                            const SizedBox(width: MeshSpace.xs),
+                            Text(
+                              'Location',
+                              style: Theme.of(context).textTheme.labelMedium,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: MeshSpace.xs),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: SizedBox(
+                            height: 180,
+                            child: FlutterMap(
+                              options: MapOptions(
+                                initialCenter: LatLng(
+                                  sos.latitude!,
+                                  sos.longitude!,
+                                ),
+                                initialZoom: 15,
+                                interactionOptions: const InteractionOptions(
+                                  flags: InteractiveFlag.none,
+                                ),
+                              ),
+                              children: [
+                                TileLayer(
+                                  urlTemplate:
+                                      'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                  userAgentPackageName: 'dev.meshsetu.mobile',
+                                ),
+                                MarkerLayer(
+                                  markers: [
+                                    Marker(
+                                      point: LatLng(
+                                        sos.latitude!,
+                                        sos.longitude!,
+                                      ),
+                                      width: 40,
+                                      height: 40,
+                                      child: const Icon(
+                                        Icons.location_pin,
+                                        color: Colors.red,
+                                        size: 40,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (sos.accuracyM != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: MeshSpace.xs),
+                            child: Text(
+                              '${sos.latitude!.toStringAsFixed(5)}, ${sos.longitude!.toStringAsFixed(5)} · ±${sos.accuracyM!.round()} m',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          )
+                        else
+                          Padding(
+                            padding: const EdgeInsets.only(top: MeshSpace.xs),
+                            child: Text(
+                              '${sos.latitude!.toStringAsFixed(5)}, ${sos.longitude!.toStringAsFixed(5)}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                        const SizedBox(height: MeshSpace.xs),
+                      ] else
+                        MeshDataRow(
+                          label: 'Location',
+                          value: 'Unavailable',
+                          icon: Icons.location_on_outlined,
+                        ),
                       const Divider(height: MeshSpace.sm),
                       MeshDataRow(
                         label: 'Route',

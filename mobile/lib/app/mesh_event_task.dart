@@ -9,9 +9,14 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart'
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../core/ble/device_key_store.dart';
+import '../core/data/database.dart';
+import '../core/protocol/authority_signature.dart';
+import '../core/protocol/return_protocol.dart';
+import '../core/security/authority_key_store.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
+import '../feature/join/join_repository.dart';
 import '../feature/sos/sos_payload.dart';
 import 'event_mode_launcher.dart';
 import 'mesh_bridge.dart';
@@ -31,6 +36,18 @@ const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
 final FlutterLocalNotificationsPlugin _sosNotifications =
     FlutterLocalNotificationsPlugin();
 bool _sosNotificationsInitialized = false;
+
+/// Reports exactly why this device could not resolve authority trust for a
+/// signed control-room response, using only a bounded safe category — never
+/// key material, signatures, or payload bytes. Emitted as both a metric-
+/// shaped record (for `mesh-metrics.ndjson`) and a task-data event the UI
+/// isolate can surface to the user.
+void _reportAuthorityTrustUnavailable(String reason) {
+  FlutterForegroundTask.sendDataToMain({
+    'status': 'authority_trust_unavailable',
+    'reason': reason,
+  });
+}
 
 Future<void> _showSosNotification({
   required ReceivedObject received,
@@ -71,6 +88,46 @@ Future<void> _showSosNotification({
     );
   } catch (_) {
     // A notification failure must not stop BLE relaying.
+  }
+}
+
+Future<void> _showVerifiedAuthorityResponse(
+  ResponderUpdateBodyData response,
+) async {
+  try {
+    if (!_sosNotificationsInitialized) {
+      await NotificationRouter.configure(_sosNotifications);
+      _sosNotificationsInitialized = true;
+    }
+    var id = response.responseId.hashCode & 0x7fffffff;
+    if (id == 0) id = 1;
+    await _sosNotifications.show(
+      id: id,
+      title: 'Control room response',
+      body: response.messageText,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Verified MeshSetu authority responses',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          ticker: 'Verified authority update',
+          category: AndroidNotificationCategory.message,
+          visibility: NotificationVisibility.public,
+          onlyAlertOnce: true,
+        ),
+      ),
+      payload: NotificationRouter.incidentPayload(
+        siteId: response.siteId,
+        eventId: response.replyToEventId,
+        objectId: 0,
+      ),
+    );
+  } catch (_) {
+    // A notification failure must not stop BLE relaying or receipt creation.
   }
 }
 
@@ -123,6 +180,8 @@ class _MeshEventTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     DartPluginRegistrant.ensureInitialized();
+    MeshEventController? startedController;
+    MeshDatabase? runtimeDatabase;
     try {
       final savedConfiguration = await FlutterForegroundTask.getData<String>(
         key: meshSiteConfigurationKey,
@@ -131,9 +190,88 @@ class _MeshEventTaskHandler extends TaskHandler {
           ? MeshSiteConfiguration.demo
           : MeshSiteConfiguration.decode(savedConfiguration) ??
                 MeshSiteConfiguration.demo;
+      final database = MeshDatabase();
+      runtimeDatabase = database;
+      final joinRepository = JoinRepository(database);
+      Future<AuthorityTrustSnapshot?> resolveAuthorityTrust() async {
+        try {
+          final manifest = await joinRepository.activeManifest();
+          if (manifest == null) {
+            _reportAuthorityTrustUnavailable('no_active_event');
+            return null;
+          }
+          if (manifest.authorityKeyId.isEmpty ||
+              manifest.authorityPublicKeyJwk == null) {
+            _reportAuthorityTrustUnavailable('manifest_missing_key');
+            return null;
+          }
+          final publicKey = AuthorityKeyStore().resolve(
+            manifest: manifest,
+            keyId: manifest.authorityKeyId,
+          );
+          if (publicKey == null) {
+            _reportAuthorityTrustUnavailable('manifest_key_unusable');
+            return null;
+          }
+          return AuthorityTrustSnapshot(
+            siteId: manifest.siteId,
+            keyId: manifest.authorityKeyId,
+            publicKey: publicKey,
+          );
+        } catch (_) {
+          _reportAuthorityTrustUnavailable('manifest_key_unusable');
+          return null;
+        }
+      }
+
+      Future<bool> isKnownSosEvent(String eventId) async {
+        final outbox = await (database.select(
+          database.outboxEvents,
+        )..where((table) => table.eventId.equals(eventId))).getSingleOrNull();
+        if (outbox?.siteId == configuration.siteId &&
+            outbox?.payloadType == PayloadType.structuredSos.name) {
+          return true;
+        }
+        final inbox = await (database.select(
+          database.inboxEvents,
+        )..where((table) => table.eventId.equals(eventId))).getSingleOrNull();
+        return inbox?.siteId == configuration.siteId &&
+            inbox?.payloadType == PayloadType.structuredSos.name;
+      }
+
       final controller = MeshEventController(
         configuration: configuration,
+        database: database,
         zoneResolver: MeshEventController.demoZoneResolver,
+        authorityTrustSnapshot: resolveAuthorityTrust,
+        isKnownSosEvent: isKnownSosEvent,
+        onVerifiedAuthorityResponse: (response) async {
+          FlutterForegroundTask.sendDataToMain({
+            'status': 'verified_authority_response',
+            'responseId': response.responseId,
+            'eventId': response.replyToEventId,
+            'siteId': response.siteId,
+            'responseType': response.type.name,
+            'messageText': response.messageText,
+            'createdAtMs': response.createdAtMs,
+          });
+          await _showVerifiedAuthorityResponse(response);
+        },
+        onAuthorityResponseProgress: (progress) {
+          FlutterForegroundTask.sendDataToMain({
+            'status': 'authority_response_progress',
+            'responseId': progress.responseId,
+            'state': progress.state,
+            'routeMode': progress.routeMode,
+            'returnHops': progress.returnHops,
+            'retryCount': progress.retryCount,
+            'error': progress.error,
+            'receiptId': progress.receiptId,
+            'replyToEventId': progress.replyToEventId,
+            'senderEphemeralId': progress.senderEphemeralId,
+            'receiptCreatedAtMs': progress.receiptCreatedAtMs,
+          });
+        },
         onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_peers',
           'peers': [
@@ -185,6 +323,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         }),
         onCompactSosAlert: _announceCompactSos,
       );
+      startedController = controller;
       await controller.start();
       _controller = controller;
       _incomingSubscription = controller.coordinator?.incoming.listen((
@@ -228,6 +367,10 @@ class _MeshEventTaskHandler extends TaskHandler {
         unawaited(_sendTestSos(controller));
       }
     } catch (error) {
+      if (_controller == null) {
+        await startedController?.stop();
+        if (startedController == null) await runtimeDatabase?.close();
+      }
       final message = error is DeviceKeyStoreException
           ? error.userMessage
           : error.toString();
@@ -371,6 +514,20 @@ class _MeshEventTaskHandler extends TaskHandler {
       return;
     }
     try {
+      if (envelope.payloadType == PayloadType.responderUpdate) {
+        // Authority responses are already signed application objects. Route
+        // them through the foreground ReturnRouter so reverse-cache targeting,
+        // local verification, retry, and expiry are all observed. They must
+        // never enter generic replication.
+        await controller.submitResponderUpdate(envelope);
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_submit_result',
+          'objectId': envelope.objectId,
+          'eventId': envelope.eventId,
+          'accepted': true,
+        });
+        return;
+      }
       final gatewayPacket = await controller.coordinator!.encryptForGateway(
         envelope,
       );
@@ -449,6 +606,9 @@ class _MeshEventTaskHandler extends TaskHandler {
         'sequence': alert.sequence,
         'flags': alert.flags,
         'ttl': alert.ttl,
+        // Compact BLE alerts intentionally carry a site fingerprint, not a
+        // recoverable full site ID. The UI compares it with B's manifest
+        // before deciding whether a CEAL incident may be forwarded.
         'siteFingerprint': alert.siteFingerprint,
         'dedupeKey': alert.dedupeKey,
         'reporterUid': alert.reporterUidHex,

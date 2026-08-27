@@ -205,25 +205,25 @@ class _DeliveryProjectionPanel extends StatelessWidget {
     final palette = MeshPalette.of(context);
     final (label, detail, icon, tone) = switch (status.phase) {
       SosDeliveryPhase.confirmed => (
-        'Mesh custody acknowledged',
+        'Live session: mesh custody acknowledged',
         'A nearby device accepted the SOS. Admin-backend delivery is not confirmed.',
         Icons.check_circle_outline,
         MeshStatusTone.active,
       ),
       SosDeliveryPhase.broadcasting => (
-        'Emergency SOS broadcasting',
+        'Live session: emergency SOS broadcasting',
         status.detail,
         Icons.bluetooth_audio,
         MeshStatusTone.active,
       ),
       SosDeliveryPhase.failed => (
-        'Delivery failed',
+        'Live session: delivery failed',
         status.detail,
         Icons.error_outline,
         MeshStatusTone.critical,
       ),
       SosDeliveryPhase.saved || SosDeliveryPhase.queued => (
-        'Waiting for a mesh peer',
+        'Live session: waiting for a mesh peer',
         status.detail,
         Icons.hourglass_top,
         MeshStatusTone.neutral,
@@ -328,37 +328,38 @@ class _DeliveryPanel extends ConsumerWidget {
     String? state,
   ) => switch (state) {
     'ready' => (
-      'Waiting for a mesh peer',
+      'Saved record: waiting for a mesh peer',
       'Your SOS is packaged and will send as soon as a device is in range.',
       Icons.hourglass_top,
       MeshStatusTone.neutral,
     ),
     'relaying' => (
-      'Relaying now',
-      'Handing your SOS to a nearby device over Bluetooth.',
+      'Saved record: sent to a nearby device',
+      'Waiting for that device to confirm receipt. If none confirms before '
+          'the response window ends, this card will show why.',
       Icons.bluetooth_audio,
       MeshStatusTone.neutral,
     ),
     'acked' => (
-      'Acknowledged by the mesh',
+      'Saved record: acknowledged by the mesh',
       'A nearby device confirmed receipt and will continue relaying it.',
       Icons.check_circle_outline,
       MeshStatusTone.active,
     ),
     'expired' => (
-      'Delivery window expired',
+      'Saved record: delivery window expired',
       'No device accepted this SOS in time. It stays queued locally.',
       Icons.error_outline,
       MeshStatusTone.critical,
     ),
     'failed' => (
-      'Delivery failed',
+      'Saved record: delivery failed',
       'This SOS could not be sent. It stays queued locally for retry.',
       Icons.error_outline,
       MeshStatusTone.critical,
     ),
     _ => (
-      'Securing your SOS',
+      'Saved record: securing your SOS',
       'Saving your emergency packet on this device before transmission.',
       Icons.lock_outline,
       MeshStatusTone.neutral,
