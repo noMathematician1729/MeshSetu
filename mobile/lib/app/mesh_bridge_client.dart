@@ -12,7 +12,9 @@ import '../core/data/outbox_sender.dart';
 import '../core/model/model.dart';
 import '../core/protocol/envelope_codec.dart';
 import '../core/protocol/relay_engine.dart';
+import '../core/protocol/return_protocol.dart';
 import '../feature/gateway/gateway_bridge.dart';
+import '../feature/gateway/gateway_downlink_poller.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
@@ -158,6 +160,7 @@ class MeshBridgeClient {
   OutboxSender? _outbox;
   bool _listening = false;
   GatewayBridge? _gatewayBridge;
+  GatewayDownlinkPoller? _gatewayDownlink;
   String? _siteId;
   int? _localEphemeralId;
   final Map<int, Completer<void>> _pendingSubmissions = {};
@@ -237,8 +240,11 @@ class MeshBridgeClient {
     if (bridge == null) {
       _adminDeliveryTimer?.cancel();
       _adminDeliveryTimer = null;
+      unawaited(_gatewayDownlink?.dispose());
+      _gatewayDownlink = null;
       return;
     }
+    _ensureGatewayDownlink();
     unawaited(_syncRelayInbox());
     // Attaching the gateway is the trigger for anything queued while this
     // device had no admin route configured.
@@ -246,11 +252,31 @@ class MeshBridgeClient {
     unawaited(_deliverToAdmin());
   }
 
+  void _ensureGatewayDownlink() {
+    if (_gatewayDownlink != null ||
+        _gatewayBridge == null ||
+        _siteId == null ||
+        _localEphemeralId == null) {
+      return;
+    }
+    final poller = GatewayDownlinkPoller(
+      bridge: _gatewayBridge!,
+      database: _db,
+      siteId: _siteId!,
+      gatewaySessionId: _localEphemeralId!.toString(),
+      localEphemeralId: _localEphemeralId!,
+      submitToMesh: _sendToMesh,
+    );
+    _gatewayDownlink = poller;
+    poller.start();
+  }
+
   void start({required String siteId, required int localEphemeralId}) {
     _ensureTaskDataListener();
     _siteId = siteId;
     _localEphemeralId = localEphemeralId;
     _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   /// Attaches this client to a site before the foreground task has reported
@@ -260,7 +286,12 @@ class MeshBridgeClient {
     _ensureTaskDataListener();
     final changed = _siteId != siteId;
     _siteId = siteId;
+    if (changed) {
+      unawaited(_gatewayDownlink?.dispose());
+      _gatewayDownlink = null;
+    }
     if (changed && _localEphemeralId != null) _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   /// Requests the identity from an already-running foreground task. This is
@@ -284,6 +315,7 @@ class MeshBridgeClient {
     }
     _localEphemeralId = localEphemeralId;
     if (_siteId != null) _activateOutbox();
+    _ensureGatewayDownlink();
   }
 
   void _activateOutbox() {
@@ -378,6 +410,7 @@ class MeshBridgeClient {
     if (!await FlutterForegroundTask.isRunningService) {
       throw StateError('event mode is not running');
     }
+
     final pending = Completer<void>();
     _pendingSubmissions[envelope.objectId] = pending;
     _submissionTimers[envelope.objectId] = Timer(
@@ -401,6 +434,71 @@ class MeshBridgeClient {
     } finally {
       _submissionTimers.remove(envelope.objectId)?.cancel();
       _pendingSubmissions.remove(envelope.objectId);
+    }
+  }
+
+  Future<void> _handleAuthorityResponseProgress(Map data) async {
+    final bridge = _gatewayBridge;
+    final localEphemeralId = _localEphemeralId;
+    final responseId = data['responseId'] as String?;
+    final state = data['state'] as String?;
+    if (bridge == null ||
+        localEphemeralId == null ||
+        responseId == null ||
+        state == null) {
+      return;
+    }
+    int? integer(Object? value) =>
+        value is num ? value.toInt() : int.tryParse('$value');
+    final senderEphemeralId = integer(data['senderEphemeralId']);
+    try {
+      await bridge.reportAuthorityResponseProgress(
+        responseId: responseId,
+        gatewaySessionId: localEphemeralId.toString(),
+        state: state,
+        routeMode: data['routeMode'] as String?,
+        returnHops: integer(data['returnHops']),
+        retryCount: integer(data['retryCount']),
+        error: data['error'] as String?,
+        receiptId: data['receiptId'] as String?,
+        replyToEventId: data['replyToEventId'] as String?,
+        senderEphemeralId: senderEphemeralId,
+      );
+      // A gateway that is also the destination does not receive its own ACK
+      // through the mesh. The receipt was durably created by ReturnRouter, so
+      // upload it directly while the normal receipt sweep remains the restart
+      // fallback.
+      if (state == 'SENDER_DELIVERED' &&
+          data['receiptId'] is String &&
+          data['replyToEventId'] is String &&
+          senderEphemeralId != null) {
+        await bridge.uploadResponseReceipt(
+          responseId: responseId,
+          receiptId: data['receiptId'] as String,
+          replyToEventId: data['replyToEventId'] as String,
+          senderEphemeralId: senderEphemeralId,
+          createdAtMs:
+              integer(data['receiptCreatedAtMs']) ??
+              DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+    } catch (_) {
+      // The durable gateway response/receipt loops retry progress after a
+      // transient network failure; mesh processing must continue regardless.
+    }
+  }
+
+  Future<void> _handleGatewayReceipt(ReceivedObject received) async {
+    final poller = _gatewayDownlink;
+    if (poller == null || received.envelope.payloadType != PayloadType.ack) {
+      return;
+    }
+    try {
+      await poller.handleReceipt(
+        ReturnProtocol.decodeAck(received.envelope.payload),
+      );
+    } catch (_) {
+      // Malformed or unrelated ACKs remain ordinary mesh traffic.
     }
   }
 
@@ -542,12 +640,15 @@ class MeshBridgeClient {
           }
         }
         unawaited(_outbox?.onMetrics(decoded) ?? Future.value());
+      case 'authority_response_progress':
+        unawaited(_handleAuthorityResponseProgress(data));
       case 'mesh_received':
         final receivedJson = data['received'];
         if (receivedJson is! Map) return;
         final received = MeshBridge.receivedFromJson(
           receivedJson.cast<Object?, Object?>(),
         );
+        unawaited(_handleGatewayReceipt(received));
         unawaited(_storeReceived(received));
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
@@ -661,6 +762,7 @@ class MeshBridgeClient {
             createdAtMs: row.createdAtMs,
             expiresAtMs: row.expiresAtMs,
           ),
+          relayDeviceId: _localEphemeralId?.toString() ?? 'gateway',
         );
         _adminDeliveredEventIds.add(row.eventId);
       } catch (_) {
@@ -889,6 +991,8 @@ class MeshBridgeClient {
   }
 
   Future<void> dispose() async {
+    await _gatewayDownlink?.dispose();
+    _gatewayDownlink = null;
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
     _adminDeliveryTimer?.cancel();

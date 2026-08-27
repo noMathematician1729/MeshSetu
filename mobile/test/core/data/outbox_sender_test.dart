@@ -6,12 +6,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:meshsetu_mobile/core/data/database.dart';
 import 'package:meshsetu_mobile/core/data/outbox_sender.dart';
 import 'package:meshsetu_mobile/core/model/model.dart';
+import 'package:meshsetu_mobile/core/protocol/relay_engine.dart';
 
 Future<OutboxEvent> _insertReady(
   MeshDatabase database, {
   required String eventId,
   required String siteId,
   int objectId = 1,
+  int? expiresAtMs,
 }) async {
   await database
       .into(database.outboxEvents)
@@ -27,7 +29,8 @@ Future<OutboxEvent> _insertReady(
           state: const Value('ready'),
           createdAtMs: 1,
           updatedAtMs: 1,
-          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 60000,
+          expiresAtMs:
+              expiresAtMs ?? DateTime.now().millisecondsSinceEpoch + 60000,
         ),
       );
   return (await (database.select(
@@ -158,4 +161,72 @@ void main() {
       expect(foreign.state, 'ready');
     },
   );
+
+  test(
+    'expires a relaying SOS when no custody acknowledgement arrives',
+    () async {
+      final sender = OutboxSender(
+        database,
+        (_) async {},
+        siteId: 'site-a',
+        localEphemeralId: 7,
+        expirySweepInterval: const Duration(milliseconds: 5),
+      );
+      addTearDown(sender.dispose);
+      sender.start();
+      await _insertReady(
+        database,
+        eventId: 'expired-sos',
+        siteId: 'site-a',
+        expiresAtMs: DateTime.now().millisecondsSinceEpoch + 20,
+      );
+
+      final row = await _waitForRow(
+        database,
+        'expired-sos',
+        (current) => current.state == 'expired',
+      );
+      expect(row.state, 'expired');
+    },
+  );
+
+  test('fails after bounded custody acknowledgement timeouts', () async {
+    final sender = OutboxSender(
+      database,
+      (_) async {},
+      siteId: 'site-a',
+      localEphemeralId: 7,
+    );
+    addTearDown(sender.dispose);
+    await _insertReady(
+      database,
+      eventId: 'timed-out-sos',
+      siteId: 'site-a',
+      objectId: 55,
+    );
+    sender.start();
+    await _waitForRow(
+      database,
+      'timed-out-sos',
+      (current) => current.state == 'relaying',
+    );
+
+    for (var i = 0; i < OutboxSender.maxAckTimeoutAttempts; i++) {
+      await sender.onMetrics(const [RelayMetric('ack_timeout', objectId: 55)]);
+      if (i + 1 < OutboxSender.maxAckTimeoutAttempts) {
+        await _waitForRow(
+          database,
+          'timed-out-sos',
+          (current) => current.state == 'relaying',
+        );
+      }
+    }
+
+    final row = await _waitForRow(
+      database,
+      'timed-out-sos',
+      (current) => current.state == 'failed',
+    );
+    expect(row.state, 'failed');
+  });
 }

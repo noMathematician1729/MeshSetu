@@ -508,92 +508,21 @@ void main() {
     expect(coordinator.relay.nextOutbound(), isNotNull);
   });
 
-  test('admits a peer whose HELLO carries a different site fingerprint', () async {
-    final localHello = const Hello(
-      siteFingerprint: 111,
-      ephemeralNodeId: 1,
-      capabilities: 1,
-      nowEpochSec: 0,
-    );
-    final coordinatorA = _coordinator(localHello: localHello);
-    final link = _FakeLink()..peer = _FakeLink();
-    coordinatorA.attach('peer-b', link, siteFingerprint: 1);
-
-    final foreignHello = const Hello(
-      siteFingerprint: 999,
-      ephemeralNodeId: 2,
-      capabilities: 1,
-      nowEpochSec: 0,
-    );
-    link.deliver(
-      FrameCodec.encode(
-        MeshFrame(
-          type: FrameType.hello,
-          priority: 0,
-          flags: 0,
-          objectId: foreignHello.ephemeralNodeId,
-          sequence: 0,
-          count: 1,
-          payload: HelloCodec.encode(foreignHello),
-        ),
-      ),
-    );
-
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-    // Site scoping is no longer a link-admission gate; it is enforced by the
-    // AEAD site key at the envelope layer.
-    expect(link.closed, isFalse);
-    expect(coordinatorA.peerCount, 1);
-  });
-
   test(
-    'log-only: a peer sending real traffic without ever sending HELLO is '
-    'flagged but not dropped',
+    'admits a peer whose HELLO carries a different site fingerprint',
     () async {
-      final metrics = <RelayMetric>[];
-      final coordinator = _coordinator(
-        localHello: const Hello(
-          siteFingerprint: 111,
-          ephemeralNodeId: 1,
-          capabilities: 1,
-          nowEpochSec: 0,
-        ),
-        onMetrics: metrics.addAll,
-      );
-      final link = _FakeLink()..peer = _FakeLink();
-      coordinator.attach('peer-b', link, siteFingerprint: 1);
-      metrics.clear();
-
-      // Deliver a well-formed non-HELLO control frame without this peer
-      // ever having sent a HELLO first.
-      link.deliver(
-        FrameCodec.encode(
-          MeshFrame(
-            type: FrameType.custodyAck,
-            priority: 0,
-            flags: 0,
-            objectId: 7,
-            sequence: 0,
-            count: 1,
-            payload: Uint8List(0),
-          ),
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-
-      expect(
-        metrics.any(
-          (m) => m.kind == 'peer_unverified_site' && m.peerId == 'peer-b',
-        ),
-        isTrue,
-      );
-      // Log-only: the connection must remain open and untouched.
-      expect(link.closed, isFalse);
-      expect(coordinator.peerCount, 1);
-
-      metrics.clear();
-      final validHello = const Hello(
+      final localHello = const Hello(
         siteFingerprint: 111,
+        ephemeralNodeId: 1,
+        capabilities: 1,
+        nowEpochSec: 0,
+      );
+      final coordinatorA = _coordinator(localHello: localHello);
+      final link = _FakeLink()..peer = _FakeLink();
+      coordinatorA.attach('peer-b', link, siteFingerprint: 1);
+
+      final foreignHello = const Hello(
+        siteFingerprint: 999,
         ephemeralNodeId: 2,
         capabilities: 1,
         nowEpochSec: 0,
@@ -604,40 +533,108 @@ void main() {
             type: FrameType.hello,
             priority: 0,
             flags: 0,
-            objectId: validHello.ephemeralNodeId,
+            objectId: foreignHello.ephemeralNodeId,
             sequence: 0,
             count: 1,
-            payload: HelloCodec.encode(validHello),
+            payload: HelloCodec.encode(foreignHello),
           ),
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(link.closed, isFalse);
-      expect(coordinator.peerCount, 1);
 
-      metrics.clear();
-      link.deliver(
-        FrameCodec.encode(
-          MeshFrame(
-            type: FrameType.custodyAck,
-            priority: 0,
-            flags: 0,
-            objectId: 8,
-            sequence: 0,
-            count: 1,
-            payload: Uint8List(0),
-          ),
-        ),
-      );
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      // After a valid same-site HELLO, subsequent traffic is verified and
-      // no longer flagged.
-      expect(
-        metrics.any((m) => m.kind == 'peer_unverified_site'),
-        isFalse,
-      );
+      // Site scoping is no longer a link-admission gate; it is enforced by the
+      // AEAD site key at the envelope layer.
+      expect(link.closed, isFalse);
+      expect(coordinatorA.peerCount, 1);
     },
   );
+
+  test('log-only: a peer sending real traffic without ever sending HELLO is '
+      'flagged but not dropped', () async {
+    final metrics = <RelayMetric>[];
+    final coordinator = _coordinator(
+      localHello: const Hello(
+        siteFingerprint: 111,
+        ephemeralNodeId: 1,
+        capabilities: 1,
+        nowEpochSec: 0,
+      ),
+      onMetrics: metrics.addAll,
+    );
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('peer-b', link, siteFingerprint: 1);
+    metrics.clear();
+
+    // Deliver a well-formed non-HELLO control frame without this peer
+    // ever having sent a HELLO first.
+    link.deliver(
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.custodyAck,
+          priority: 0,
+          flags: 0,
+          objectId: 7,
+          sequence: 0,
+          count: 1,
+          payload: Uint8List(0),
+        ),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(
+      metrics.any(
+        (m) => m.kind == 'peer_unverified_site' && m.peerId == 'peer-b',
+      ),
+      isTrue,
+    );
+    // Log-only: the connection must remain open and untouched.
+    expect(link.closed, isFalse);
+    expect(coordinator.peerCount, 1);
+
+    metrics.clear();
+    final validHello = const Hello(
+      siteFingerprint: 111,
+      ephemeralNodeId: 2,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    link.deliver(
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.hello,
+          priority: 0,
+          flags: 0,
+          objectId: validHello.ephemeralNodeId,
+          sequence: 0,
+          count: 1,
+          payload: HelloCodec.encode(validHello),
+        ),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(link.closed, isFalse);
+    expect(coordinator.peerCount, 1);
+
+    metrics.clear();
+    link.deliver(
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.custodyAck,
+          priority: 0,
+          flags: 0,
+          objectId: 8,
+          sequence: 0,
+          count: 1,
+          payload: Uint8List(0),
+        ),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    // After a valid same-site HELLO, subsequent traffic is verified and
+    // no longer flagged.
+    expect(metrics.any((m) => m.kind == 'peer_unverified_site'), isFalse);
+  });
 
   test(
     'a stale replacement state event cannot detach the new session',
@@ -1282,6 +1279,155 @@ void main() {
       await coordinator.stop();
     },
   );
+
+  test(
+    'targeted send uses the ephemeral peer mapping and preserves fragmentation',
+    () async {
+      final metrics = <RelayMetric>[];
+      final coordinator = _coordinator(onMetrics: metrics.addAll);
+      final link = _FakeLink(mtu: 40)..peer = _FakeLink();
+      coordinator.attach('relay-peer', link, siteFingerprint: 1);
+      coordinator.peerDirectory.register(
+        ephemeralNodeId: 0x102030405060708,
+        peerId: 'relay-peer',
+        mtu: link.mtu,
+        lastSeenMs: 100,
+        siteFingerprint: 1,
+      );
+
+      final sent = await coordinator.sendToPeer(
+        0x102030405060708,
+        EncryptedObject(
+          objectId: 401,
+          trafficClass: TrafficClass.authorityControl,
+          bytes: Uint8List.fromList(List<int>.filled(100, 7)),
+          expiresAtMs: 1000,
+        ),
+      );
+
+      expect(sent, isTrue);
+      expect(link.sentFrames.length, greaterThan(1));
+      expect(
+        link.sentFrames.map((frame) => FrameCodec.decode(frame).type),
+        everyElement(FrameType.data),
+      );
+      expect(
+        metrics.any(
+          (metric) =>
+              metric.kind == 'target_send_succeeded' && metric.objectId == 401,
+        ),
+        isTrue,
+      );
+      await coordinator.stop();
+    },
+  );
+
+  test('targeted send rejects an unknown or detached ephemeral peer', () async {
+    final metrics = <RelayMetric>[];
+    final coordinator = _coordinator(onMetrics: metrics.addAll);
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('relay-peer', link, siteFingerprint: 1);
+    coordinator.peerDirectory.register(
+      ephemeralNodeId: 402,
+      peerId: 'relay-peer',
+      mtu: link.mtu,
+      lastSeenMs: 100,
+      siteFingerprint: 1,
+    );
+    final object = EncryptedObject(
+      objectId: 402,
+      trafficClass: TrafficClass.authorityControl,
+      bytes: Uint8List.fromList([1, 2, 3]),
+      expiresAtMs: 1000,
+    );
+
+    expect(await coordinator.sendToPeer(999, object), isFalse);
+    await coordinator.stop();
+    expect(await coordinator.sendToPeer(402, object), isFalse);
+    expect(metrics.any((metric) => metric.kind == 'target_peer_miss'), isTrue);
+  });
+
+  test(
+    'targeted send honors frame interception and low-MTU rejection',
+    () async {
+      final metrics = <RelayMetric>[];
+      final coordinator = _coordinator(
+        frameInterceptor: LossyFrameInterceptor(dropEvery: 1),
+        onMetrics: metrics.addAll,
+      );
+      final interceptedLink = _FakeLink()..peer = _FakeLink();
+      coordinator.attach(
+        'intercepted-peer',
+        interceptedLink,
+        siteFingerprint: 1,
+      );
+      coordinator.peerDirectory.register(
+        ephemeralNodeId: 403,
+        peerId: 'intercepted-peer',
+        mtu: interceptedLink.mtu,
+        lastSeenMs: 100,
+        siteFingerprint: 1,
+      );
+      final intercepted = await coordinator.sendToPeer(
+        403,
+        EncryptedObject(
+          objectId: 403,
+          trafficClass: TrafficClass.authorityControl,
+          bytes: Uint8List.fromList(List<int>.filled(20, 1)),
+          expiresAtMs: 1000,
+        ),
+      );
+      expect(intercepted, isFalse);
+      expect(interceptedLink.sentFrames, isEmpty);
+
+      final lowMtuCoordinator = _coordinator(onMetrics: metrics.addAll);
+      final lowMtuLink = _FakeLink(mtu: 7)..peer = _FakeLink();
+      lowMtuCoordinator.attach('low-mtu-peer', lowMtuLink, siteFingerprint: 1);
+      lowMtuCoordinator.peerDirectory.register(
+        ephemeralNodeId: 404,
+        peerId: 'low-mtu-peer',
+        mtu: lowMtuLink.mtu,
+        lastSeenMs: 100,
+        siteFingerprint: 1,
+      );
+      final rejected = await lowMtuCoordinator.sendToPeer(
+        404,
+        EncryptedObject(
+          objectId: 404,
+          trafficClass: TrafficClass.authorityControl,
+          bytes: Uint8List.fromList(List<int>.filled(3000, 1)),
+          expiresAtMs: 1000,
+        ),
+      );
+      expect(rejected, isFalse);
+      expect(lowMtuLink.sentFrames, isEmpty);
+      expect(
+        metrics.any((metric) => metric.kind == 'target_send_mtu_rejected'),
+        isTrue,
+      );
+      await coordinator.stop();
+      await lowMtuCoordinator.stop();
+    },
+  );
+
+  test('detaching a session removes its ephemeral target mapping', () async {
+    final coordinator = _coordinator();
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('relay-peer', link, siteFingerprint: 1);
+    coordinator.peerDirectory.register(
+      ephemeralNodeId: 405,
+      peerId: 'relay-peer',
+      mtu: link.mtu,
+      lastSeenMs: 100,
+      siteFingerprint: 1,
+    );
+
+    link.emitState(PeerSessionState.disconnected);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(coordinator.peerDirectory.entryFor(405), isNull);
+    await coordinator.stop();
+  });
 
   test(
     'defers an unfragmentable room message instead of requeueing it',

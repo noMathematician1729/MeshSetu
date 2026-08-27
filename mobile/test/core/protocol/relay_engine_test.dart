@@ -310,6 +310,90 @@ void main() {
     },
   );
 
+  test(
+    'observes every authenticated SOS path before duplicate suppression',
+    () async {
+      final crypto = AeadEnvelope(List.filled(32, 9));
+      final observations = <String>[];
+      final engine = MeshRelayEngine(
+        siteId: 'site',
+        crypto: crypto,
+        store: _RecordingStore(),
+        clockMs: () => 100,
+        onValidSos: (envelope, peerId) {
+          observations.add('$peerId:${envelope.objectId}');
+        },
+      );
+      final source = MeshEnvelope(
+        objectId: 16,
+        eventId: 'event',
+        siteId: 'site',
+        roomId: 'room',
+        createdAtMs: 1,
+        expiresAtMs: 1000,
+        hopCount: 0,
+        hopLimit: 2,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+        payload: Uint8List.fromList([9]),
+        originEphemeralId: 123,
+      );
+      final encrypted = await crypto.encrypt(source);
+      final frame = FrameCodec.encode(
+        fragment(
+          objectId: source.objectId,
+          priority: 1,
+          encrypted: encrypted.bytes,
+          mtu: 185,
+        ).single,
+      );
+
+      await engine.receive('relay-a', frame);
+      await engine.receive('relay-b', frame);
+
+      expect(observations, ['relay-a:16', 'relay-b:16']);
+    },
+  );
+
+  test('does not observe wrong-site SOS traffic', () async {
+    final crypto = AeadEnvelope(List.filled(32, 10));
+    var observed = false;
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: _RecordingStore(),
+      clockMs: () => 100,
+      onValidSos: (_, __) => observed = true,
+    );
+    final source = MeshEnvelope(
+      objectId: 17,
+      eventId: 'event',
+      siteId: 'other',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000,
+      hopCount: 0,
+      hopLimit: 2,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([9]),
+      originEphemeralId: 123,
+    );
+    final encrypted = await crypto.encrypt(source);
+    final frame = FrameCodec.encode(
+      fragment(
+        objectId: source.objectId,
+        priority: 1,
+        encrypted: encrypted.bytes,
+        mtu: 185,
+      ).single,
+    );
+
+    await engine.receive('relay-a', frame);
+
+    expect(observed, isFalse);
+  });
+
   test('file store restores pending outbox', () {
     final directory = Directory.systemTemp.createTempSync('meshsetu-relay');
     addTearDown(() => directory.deleteSync(recursive: true));

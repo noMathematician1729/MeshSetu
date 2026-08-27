@@ -388,8 +388,15 @@ class MeshGattServer {
           notificationId: notificationId,
           deviceId: deviceId,
         ).timeout(notificationTimeout);
-      } catch (_) {
-        _diagnostic('tx_notify_api_result', deviceId, detail: 'failed');
+      } catch (error) {
+        // Surface the real cause: a bare 'failed' cannot distinguish a
+        // platform-channel timeout from a native GATT rejection, and the
+        // difference decides whether the fault is app-side or radio-side.
+        _diagnostic(
+          'tx_notify_api_result',
+          deviceId,
+          detail: 'failed: ${error.runtimeType}: $error',
+        );
         await completionSubscription?.cancel();
         return false;
       }

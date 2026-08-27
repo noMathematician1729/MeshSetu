@@ -32,3 +32,4 @@ dist/
 
 # Large model assets (fetched out of band)
 mobile/assets/models/sherpa-onnx-whisper-base/
+Ceal
